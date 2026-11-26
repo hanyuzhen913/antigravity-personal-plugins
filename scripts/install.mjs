@@ -45,6 +45,7 @@ Options:
                      into ~/.gemini/antigravity/backups/personal-plugins-<timestamp>/
   --no-backup        Skip backup (default)
   --sync-from-local  Reverse-sync local installed plugins & sanitized configs back into repo
+  --skip-skill       Skip syncing the global 'update-plugins' skill to ~/.gemini/config/skills/
   --dry-run          Print planned operations without modifying disk
   -h, --help         Show this help message
 `);
@@ -56,6 +57,7 @@ function parseArgs(argv) {
     forceDefaults: false,
     backup: false,
     syncFromLocal: false,
+    skipSkill: false,
     dryRun: false,
     help: false,
   };
@@ -72,6 +74,8 @@ function parseArgs(argv) {
       opts.backup = false;
     } else if (arg === '--sync-from-local') {
       opts.syncFromLocal = true;
+    } else if (arg === '--skip-skill') {
+      opts.skipSkill = true;
     } else if (arg === '--dry-run') {
       opts.dryRun = true;
     } else if (arg === '--only' && i + 1 < argv.length) {
@@ -119,6 +123,7 @@ function getLocalPaths() {
   const home = os.homedir();
   return {
     pluginsDir: path.join(home, '.gemini', 'config', 'plugins'),
+    skillsDir: path.join(home, '.gemini', 'config', 'skills'),
     backupsRoot: path.join(home, '.gemini', 'antigravity', 'backups'),
     commandHubState: path.join(home, '.gemini', 'antigravity', 'plugin_data', 'dev-command-hub', 'state.json'),
     contextMonitorState: getContextMonitorStatePath(),
@@ -312,6 +317,13 @@ function installToLocal(opts) {
         console.log(`[skip] preserve existing context-monitor state-v1.json (use --force-defaults to merge preferences): ${dstState}`);
       }
     }
+  }
+
+  const repoSkillDir = path.join(REPO_ROOT, 'skills', 'update-plugins');
+  if (!opts.skipSkill && fs.existsSync(repoSkillDir)) {
+    const dstSkillDir = path.join(local.skillsDir, 'update-plugins');
+    const skillFiles = copyTreeFiltered(repoSkillDir, dstSkillDir, { dryRun: opts.dryRun });
+    console.log(`${opts.dryRun ? '[dry-run] ' : '[ok] '}sync global skill update-plugins -> ${dstSkillDir} (${skillFiles} file(s))`);
   }
 
   console.log('\nNext step:');

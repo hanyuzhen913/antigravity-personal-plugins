@@ -30,7 +30,7 @@ const EXCLUDED_RUNTIME_FILES = new Set([
 ]);
 
 const TEXT_EXTENSIONS = new Set([
-  '.js', '.mjs', '.cjs', '.json', '.md', '.txt', '.html', '.css', '.ps1', '.sh', '.svg', '',
+  '.js', '.mjs', '.cjs', '.json', '.md', '.txt', '.html', '.css', '.ps1', '.sh', '.svg', '.patch', '',
 ]);
 
 const FORBIDDEN_CM_KEYS = new Set([
@@ -103,6 +103,7 @@ function checkAgyPlugins() {
 function checkSyntax() {
   const targets = [
     'scripts/install.mjs',
+    'scripts/update-upstream.mjs',
     'scripts/validate.mjs',
     'plugins/obsidian-prism/cdp.js',
     'plugins/dev-command-hub/scripts/mcp-server.cjs',
@@ -199,6 +200,18 @@ function checkHygieneAndSecrets() {
   if (artifactCount === 0) ok('No excluded runtime artifacts in repo');
   if (pathHits === 0) ok('No personal local paths or username leaks found');
   if (secretHits === 0) ok('No real API keys or token literals found');
+
+  const skillPath = path.join(REPO_ROOT, 'skills', 'update-plugins', 'SKILL.md');
+  if (!fs.existsSync(skillPath)) {
+    fail('Missing skills/update-plugins/SKILL.md');
+  } else {
+    const skillText = fs.readFileSync(skillPath, 'utf8');
+    if (!skillText.startsWith('---')) {
+      fail('skills/update-plugins/SKILL.md must begin with YAML frontmatter (---)');
+    } else {
+      ok('skills/update-plugins/SKILL.md frontmatter valid');
+    }
+  }
 }
 
 function main() {

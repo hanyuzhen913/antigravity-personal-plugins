@@ -28,7 +28,10 @@
 ├── scripts/
 │   ├── install.mjs                    # 跨平台安装与双向同步脚本（纯 Node >=22）
 │   ├── install.ps1                    # Windows PowerShell 快捷封装
+│   ├── update-upstream.mjs            # 安全跟进上游更新（自动保留个人改代码与配置）
 │   └── validate.mjs                   # 严格校验、语法检查与隐私/敏感信息扫描
+├── skills/
+│   └── update-plugins/SKILL.md        # 全局技能：说“更新插件”即可自动执行上游安全升级
 ├── THIRD_PARTY_NOTICES.md             # 协议矩阵与上游版权声明
 └── README.md
 ```
@@ -91,8 +94,16 @@ node scripts/install.mjs --sync-from-local
 
 ## 如何跟进原作者更新
 
-- **Antigravity Context Monitor（仅改过默认配置）**：直接在插件面板升级或替换本机 `~/.gemini/config/plugins/antigravity-context-monitor` 后，运行 `node scripts/install.mjs --sync-from-local --only antigravity-context-monitor` 同步回本仓库即可，偏好设置会自动保留脱敏种子。
-- **Obsidian Prism（含源码修改）**：切勿在面板中直接覆写更新；请在本地 Git 源码库中先更新纯净 `main` 分支再 `git rebase main` 到 `my-custom` 分支（或基于 [`patches/obsidian-prism.patch`](./patches/obsidian-prism.patch) 使用 `git apply --3way` 重放），完整步骤见 [`patches/README.md`](./patches/README.md)。
+- **一句话自动更新（推荐）**：安装脚本会自动将 [`skills/update-plugins/SKILL.md`](./skills/update-plugins/SKILL.md) 同步到 `~/.gemini/config/skills/update-plugins/`。在任意对话中只需说 **“更新插件”**（或 `/update-plugins`），助手就会自动调用 [`scripts/update-upstream.mjs`](./scripts/update-upstream.mjs)：
+  - 检查并更新 `antigravity-context-monitor`（SHA-256 校验，保留你的 `state-v1.json` 与告警阈值）；
+  - 为 `obsidian-prism` 自动先捕获本地新改动到 `my-custom`，再 `rebase` 作者最新 `main`（遇冲突由助手合并，不覆盖你的自定义代码）、跑单测、部署并重导 [`patches/obsidian-prism.patch`](./patches/obsidian-prism.patch)；
+  - 最后运行 `node scripts/validate.mjs` 校验并推送到本仓库。
+- **手动命令行检查 / 升级**：
+  ```bash
+  node scripts/update-upstream.mjs --check   # 仅检查是否有上游更新
+  node scripts/update-upstream.mjs           # 执行安全更新
+  ```
+- **详情与手动重放说明**：见 [`patches/README.md`](./patches/README.md)。
 
 ---
 
