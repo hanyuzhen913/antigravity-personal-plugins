@@ -22,6 +22,9 @@
 │   ├── obsidian-prism.config.json     # Obsidian Prism 默认配置模板
 │   ├── dev-command-hub.state.json     # Dev Command Hub 默认状态模板
 │   └── context-monitor.defaults.json  # Context Monitor 脱敏偏好种子（无账号/历史账本）
+├── patches/
+│   ├── obsidian-prism.patch           # Obsidian Prism 相对上游的完整定制补丁
+│   └── README.md                      # 上游更新与补丁重放指南
 ├── scripts/
 │   ├── install.mjs                    # 跨平台安装与双向同步脚本（纯 Node >=22）
 │   ├── install.ps1                    # Windows PowerShell 快捷封装
@@ -83,6 +86,13 @@ node scripts/install.mjs --sync-from-local
 
 - **Obsidian Prism**：已在默认配置与内置 fallback 中设置 `"autoUpdate": "off"`，不会自动从上游拉取更新覆盖你的本地定制。
 - **Antigravity Context Monitor**：保留轻量版本检查提示（`autoCheckUpdates: true`），但不会自动覆盖本地文件；仅当你主动在面板中点击升级或运行升级命令时才会拉取上游包（若需完全关闭检查，可在面板设置中关闭，或同步 `defaults/context-monitor.defaults.json` 里的 `autoCheckUpdates: false`）。
+
+---
+
+## 如何跟进原作者更新
+
+- **Antigravity Context Monitor（仅改过默认配置）**：直接在插件面板升级或替换本机 `~/.gemini/config/plugins/antigravity-context-monitor` 后，运行 `node scripts/install.mjs --sync-from-local --only antigravity-context-monitor` 同步回本仓库即可，偏好设置会自动保留脱敏种子。
+- **Obsidian Prism（含源码修改）**：切勿在面板中直接覆写更新；请在本地 Git 源码库中先更新纯净 `main` 分支再 `git rebase main` 到 `my-custom` 分支（或基于 [`patches/obsidian-prism.patch`](./patches/obsidian-prism.patch) 使用 `git apply --3way` 重放），完整步骤见 [`patches/README.md`](./patches/README.md)。
 
 ---
 
