@@ -1,0 +1,23 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "dev-command-hub",
+  "displayName": "Dev Command Hub",
+  "version": "2.2.0",
+  "description": "原生 MCP App 全量指令效率中心：右侧常驻微型面板（/hub）、输入框上方内联快捷选择条（/bar）、一键直发安全防误触、自定义指令/Prompt 模板与 JSON 备份。",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "🎛️ 打开可视化指令控制台",
+    "⚡ 呼出内联快捷选择条 (/bar)",
+    "🚀 新功能标准流 (/nf)"
+  ],
+  "author": "Local Developer",
+  "license": "MIT",
+  "keywords": [
+    "commands",
+    "workflow",
+    "productivity",
+    "shortcuts",
+    "command-hub",
+    "mcp-app"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "command": "node",
+  "args": [
+    "main.mjs"
+  ],
+  "restart_policy": "always",
+  "display_name": "Obsidian Prism Daemon",
+  "description": "Zero-ASAR live optical UI injection, reload persistence, Git sync bridge, and on-demand telemetry for Obsidian Prism.",
+  "has_web_ui": false
+}

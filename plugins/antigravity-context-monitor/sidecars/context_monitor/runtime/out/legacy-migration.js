@@ -1,0 +1,172 @@
+"use strict";
+// ─── Legacy Antigravity Data Migration ───────────────────────────────────────
+// Detects old "Antigravity" (pre-2.0) globalState databases and automatically
+// recovers calendar data + language preference for users who upgraded to
+// "Antigravity IDE". Runs once on activation; skipped if already migrated.
+//
+// The old globalState is an SQLite database (state.vscdb) at:
+//   Windows: %APPDATA%\Antigravity\User\globalStorage\state.vscdb
+//   macOS:   ~/Library/Application Support/Antigravity/User/globalStorage/state.vscdb
+//   Linux:   ~/.config/Antigravity/User/globalStorage/state.vscdb
+//
+// Strategy: spawn a child Node.js process with --experimental-sqlite to read
+// the old DB (the extension's own Node.js runtime may not support node:sqlite).
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.runLegacyMigrationOnce = runLegacyMigrationOnce;
+exports.getOldAntigravityDbPath = getOldAntigravityDbPath;
+exports.extractLegacyData = extractLegacyData;
+const fs = __importStar(require("fs"));
+const path = __importStar(require("path"));
+const os = __importStar(require("os"));
+const child_process_1 = require("child_process");
+function runLegacyMigrationOnce(options) {
+    if (options.migrationDone) {
+        options.log('Legacy migration: data OK, no migration needed');
+        return null;
+    }
+    const result = options.extractLegacyData();
+    if (result.status === 'imported' && result.data) {
+        options.importLegacyData(result.data);
+    }
+    else if (result.status === 'failed') {
+        options.log('Legacy migration: failed, will retry next launch');
+        return result;
+    }
+    else {
+        options.log('Legacy migration: no recoverable data found');
+    }
+    options.markDone();
+    options.log('Legacy migration: done');
+    return result;
+}
+/**
+ * Get the path to the old Antigravity globalState database.
+ * Returns null if the file doesn't exist.
+ */
+function getOldAntigravityDbPath() {
+    let appDataDir;
+    switch (process.platform) {
+        case 'win32':
+            appDataDir = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+            break;
+        case 'darwin':
+            appDataDir = path.join(os.homedir(), 'Library', 'Application Support');
+            break;
+        default: // linux
+            appDataDir = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
+            break;
+    }
+    const dbPath = path.join(appDataDir, 'Antigravity', 'User', 'globalStorage', 'state.vscdb');
+    return fs.existsSync(dbPath) ? dbPath : null;
+}
+// Inline extraction script — executed in a child process with --experimental-sqlite.
+// Must be self-contained (no imports from the extension).
+const EXTRACT_SCRIPT = `
+const { DatabaseSync } = require('node:sqlite');
+const dbPath = process.argv[2];
+const extensionKey = process.argv[3];
+try {
+    const db = new DatabaseSync(dbPath, { open: true, readOnly: true });
+    const row = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(extensionKey);
+    db.close();
+    if (!row || !row.value) { process.stdout.write('{}'); process.exit(0); }
+    const parsed = JSON.parse(row.value);
+    const result = {};
+    if (parsed.dailyStoreState) { result.dailyStoreState = parsed.dailyStoreState; }
+    if (parsed.displayLanguage) { result.displayLanguage = parsed.displayLanguage; }
+    process.stdout.write(JSON.stringify(result));
+} catch (e) {
+    process.stderr.write(e.message);
+    process.exit(1);
+}
+`;
+/**
+ * Attempt to extract calendar data and language from the old Antigravity DB.
+ * Uses a child process with node:sqlite to avoid adding native dependencies.
+ * Distinguishes transient extraction failures from definitive empty/not-found results.
+ */
+function extractLegacyData(log) {
+    const dbPath = getOldAntigravityDbPath();
+    if (!dbPath) {
+        log('Legacy migration: no old Antigravity DB found');
+        return { status: 'not_found' };
+    }
+    log(`Legacy migration: found old DB at ${dbPath}`);
+    // The extension stores all globalState under a single key
+    const extensionKey = 'AGI-is-going-to-arrive.antigravity-context-monitor';
+    try {
+        // Use the system Node.js (process.execPath is the IDE's node, which may not have sqlite)
+        // Try the IDE's node first; fall back to 'node' on PATH
+        const nodePaths = [process.execPath, 'node'];
+        let lastError = '';
+        for (const nodePath of nodePaths) {
+            try {
+                const stdout = (0, child_process_1.execFileSync)(nodePath, [
+                    '--experimental-sqlite',
+                    '-e', EXTRACT_SCRIPT,
+                    dbPath,
+                    extensionKey,
+                ], {
+                    encoding: 'utf8',
+                    timeout: 10_000,
+                    stdio: ['pipe', 'pipe', 'pipe'],
+                    windowsHide: true,
+                });
+                const data = JSON.parse(stdout);
+                if (data.dailyStoreState || data.displayLanguage) {
+                    const recordCount = data.dailyStoreState?.records
+                        ? Object.keys(data.dailyStoreState.records).length
+                        : 0;
+                    log(`Legacy migration: extracted ${recordCount} calendar records, language=${data.displayLanguage || 'none'}`);
+                    return { status: 'imported', data };
+                }
+                log('Legacy migration: old DB exists but no extension data found');
+                return { status: 'empty' };
+            }
+            catch (err) {
+                lastError = err instanceof Error ? err.message : String(err);
+                continue; // try next node path
+            }
+        }
+        log(`Legacy migration: failed to read old DB — ${lastError}`);
+        return { status: 'failed', error: lastError };
+    }
+    catch (err) {
+        log(`Legacy migration: unexpected error — ${err}`);
+        return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
+    }
+}
+//# sourceMappingURL=legacy-migration.js.map

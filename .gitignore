@@ -1,0 +1,16 @@
+# Obsidian Prism runtime caches, locks, logs, and local-machine metadata
+.bundle-cache.json
+.daemon.pid
+.patched-shortcuts.json
+.relaunch-task.json
+.watch.pid
+daemon.log
+repo-meta.json
+
+# OS & Node artifacts
+.DS_Store
+Thumbs.db
+node_modules/
+*.log
+*.tmp
+*.bak

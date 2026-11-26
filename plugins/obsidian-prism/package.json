@@ -1,0 +1,41 @@
+{
+  "name": "obsidian-prism",
+  "version": "1.0.8-beta.2",
+  "description": "Obsidian Prism (黑曜棱镜) — Optical UI & Motion Suite for Antigravity. Unified 4-tier spring choreography, daylight crystal themes, 512K telemetry vial, reasoning effort slider, and dual-mode thought translator.",
+  "license": "GPL-3.0-only",
+  "author": "RMvdesi",
+  "private": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RMvdesi/obsidian-prism.git"
+  },
+  "homepage": "https://github.com/RMvdesi/obsidian-prism#readme",
+  "bugs": {
+    "url": "https://github.com/RMvdesi/obsidian-prism/issues"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "keywords": [
+    "antigravity",
+    "theme",
+    "optical-ui",
+    "spring-motion",
+    "webgl2",
+    "telemetry",
+    "thought-translator"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "workbench": "node workbench/server.cjs",
+    "inject": "node inject.js",
+    "watch": "node inject.js --watch",
+    "daemon": "node sidecars/daemon/main.mjs",
+    "remove": "node remove.js",
+    "install:plugin": "node tools/install-plugin.cjs --install",
+    "archive:conversations": "node sidecars/daemon/conversation-archive.mjs",
+    "clean:legacy": "node tools/patch-asar.cjs --clean-legacy",
+    "build:installer": "node scripts/build-installer.mjs --out dist/obsidian-prism-installer.exe",
+    "build:macos": "node scripts/build-macos.mjs"
+  }
+}

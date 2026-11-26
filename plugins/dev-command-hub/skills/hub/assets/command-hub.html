@@ -1,0 +1,1258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dev Command Hub</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      background-color: var(--background);
+      color: var(--foreground);
+      margin: 0;
+      padding: 0;
+      min-height: 100%;
+      overflow-x: hidden;
+    }
+
+    /* macOS 氛围渐变光晕，基于宿主主题令牌动态混色 */
+    .ambient-bg {
+      background-image:
+        radial-gradient(640px 320px at 12% -6%, color-mix(in srgb, var(--chart-1) 16%, transparent), transparent 72%),
+        radial-gradient(560px 280px at 88% -4%, color-mix(in srgb, var(--chart-2) 15%, transparent), transparent 72%),
+        radial-gradient(520px 260px at 50% 100%, color-mix(in srgb, var(--chart-3) 10%, transparent), transparent 75%);
+    }
+
+    /* macOS 毛玻璃基础材质 */
+    .glass-bar {
+      background-color: color-mix(in srgb, var(--background) 78%, transparent);
+      backdrop-filter: blur(22px) saturate(175%);
+      -webkit-backdrop-filter: blur(22px) saturate(175%);
+      border-bottom: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+    }
+
+    .glass-card {
+      background-color: color-mix(in srgb, var(--card) 76%, transparent);
+      backdrop-filter: blur(18px) saturate(165%);
+      -webkit-backdrop-filter: blur(18px) saturate(165%);
+      border: 1px solid color-mix(in srgb, var(--card-border) 82%, transparent);
+      box-shadow:
+        inset 0 1px 0 color-mix(in srgb, var(--foreground) 8%, transparent),
+        0 6px 20px -10px color-mix(in srgb, var(--foreground) 14%, transparent);
+      transition: transform 160ms ease, border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+    }
+
+    .glass-card:hover {
+      background-color: color-mix(in srgb, var(--card) 90%, transparent);
+      border-color: color-mix(in srgb, var(--primary) 42%, var(--card-border));
+      box-shadow:
+        inset 0 1px 0 color-mix(in srgb, var(--foreground) 12%, transparent),
+        0 10px 26px -12px color-mix(in srgb, var(--primary) 26%, transparent);
+    }
+
+    .glass-hero {
+      background-color: color-mix(in srgb, var(--card) 82%, transparent);
+      backdrop-filter: blur(20px) saturate(170%);
+      -webkit-backdrop-filter: blur(20px) saturate(170%);
+      border: 1px solid color-mix(in srgb, var(--primary) 24%, var(--card-border));
+      box-shadow:
+        inset 0 1px 0 color-mix(in srgb, var(--foreground) 10%, transparent),
+        0 10px 28px -14px color-mix(in srgb, var(--primary) 28%, transparent);
+      transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+    }
+
+    .glass-hero:hover {
+      transform: translateY(-1px);
+      border-color: color-mix(in srgb, var(--primary) 52%, var(--card-border));
+    }
+
+    .glass-input {
+      background-color: color-mix(in srgb, var(--content) 75%, transparent);
+      border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+      color: var(--foreground);
+      transition: border-color 150ms ease, box-shadow 150ms ease;
+    }
+
+    .glass-input::placeholder {
+      color: var(--placeholder);
+    }
+
+    .glass-input:focus {
+      outline: none;
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent);
+    }
+
+    .glass-pill {
+      background-color: color-mix(in srgb, var(--secondary) 72%, transparent);
+      border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+      color: var(--muted-foreground);
+      transition: all 140ms ease;
+    }
+
+    .glass-pill:hover {
+      color: var(--foreground);
+      border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
+    }
+
+    .glass-pill.is-active {
+      background-color: color-mix(in srgb, var(--primary) 18%, var(--card));
+      border-color: color-mix(in srgb, var(--primary) 55%, transparent);
+      color: var(--foreground);
+    }
+
+    .glass-toast {
+      background-color: color-mix(in srgb, var(--card) 92%, transparent);
+      backdrop-filter: blur(22px) saturate(180%);
+      -webkit-backdrop-filter: blur(22px) saturate(180%);
+      border: 1px solid color-mix(in srgb, var(--success) 48%, var(--border));
+      box-shadow: 0 14px 36px -12px color-mix(in srgb, var(--foreground) 24%, transparent);
+    }
+
+    .cmd-mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    /* 隐藏横向滚动条 */
+    .no-scrollbar::-webkit-scrollbar {
+      display: none;
+    }
+    .no-scrollbar {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+  </style>
+</head>
+<body class="ambient-bg text-[var(--foreground)] antialiased">
+  <!-- 顶部粘性毛玻璃导航与搜索区 -->
+  <header class="glass-bar sticky top-0 z-30">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 py-3.5 space-y-3">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div class="flex items-center gap-2.5 min-w-0">
+          <div class="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 border border-[var(--card-border)]"
+               style="background: linear-gradient(135deg, color-mix(in srgb, var(--chart-1) 24%, var(--card)), color-mix(in srgb, var(--chart-2) 22%, var(--card)));">
+            <svg class="w-4 h-4 text-[var(--primary)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M9 5L5 19" />
+              <path d="M13 8l5 4-5 4" />
+            </svg>
+          </div>
+          <div class="min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+              <h1 class="text-sm sm:text-base font-semibold tracking-tight text-[var(--foreground)]">Dev Command Hub</h1>
+              <span id="total-badge" class="text-xs px-2 py-0.5 rounded-full border border-[var(--border)] bg-[var(--secondary)] text-[var(--muted-foreground)]">
+                3 组合流 · 24 指令
+              </span>
+            </div>
+            <p class="text-xs text-[var(--muted-foreground)] truncate">
+              搜索中文场景或英文指令，点击卡片拼装参数并一键复制
+            </p>
+          </div>
+        </div>
+
+        <!-- 实时搜索框 -->
+        <div class="relative w-full sm:w-80 shrink-0">
+          <svg class="w-4 h-4 text-[var(--muted-foreground)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" />
+            <path d="m20 20-3.5-3.5" />
+          </svg>
+          <input
+            id="search-input"
+            type="text"
+            autocomplete="off"
+            placeholder="搜中文场景或指令（如：回退、并行、/cs）"
+            class="glass-input w-full rounded-xl pl-9 pr-14 py-2 text-xs sm:text-sm"
+          />
+          <button
+            id="clear-search-btn"
+            type="button"
+            class="hidden absolute right-2 top-1/2 -translate-y-1/2 text-xs px-1.5 py-0.5 rounded-md text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--secondary)]"
+            title="清空搜索 (Esc)"
+          >
+            清空
+          </button>
+          <span
+            id="search-kbd-hint"
+            class="cmd-mono absolute right-2.5 top-1/2 -translate-y-1/2 text-xs px-1.5 py-0.5 rounded border border-[var(--border)] text-[var(--muted-foreground)] pointer-events-none"
+          >/</span>
+        </div>
+      </div>
+
+      <!-- 分类筛选 Tabs + 环境胶囊 -->
+      <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-2">
+        <div id="category-tabs" class="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5"></div>
+        <div id="env-pills" class="flex items-center gap-1.5 overflow-x-auto no-scrollbar shrink-0"></div>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-6xl mx-auto px-4 sm:px-6 py-5 space-y-6">
+    <!-- 顶部 3 个高亮组合工作流大卡片 -->
+    <section aria-labelledby="workflows-heading" class="space-y-3">
+      <div class="flex items-center justify-between gap-2">
+        <div class="flex items-center gap-2">
+          <h2 id="workflows-heading" class="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+            高频组合工作流（极简短指令 + 一键编排）
+          </h2>
+        </div>
+        <span class="text-xs text-[var(--muted-foreground)]">App / CLI 通用短入口</span>
+      </div>
+      <div id="workflows-grid" class="grid grid-cols-1 md:grid-cols-3 gap-3.5"></div>
+    </section>
+
+    <!-- 下方 24 条单指令双列网格 -->
+    <section aria-labelledby="commands-heading" class="space-y-3">
+      <div class="flex items-center justify-between gap-2 flex-wrap">
+        <div class="flex items-center gap-2">
+          <h2 id="commands-heading" class="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+            全量研发指令库
+          </h2>
+          <span id="visible-count" class="text-xs px-2 py-0.5 rounded-full bg-[var(--secondary)] text-[var(--muted-foreground)] border border-[var(--border)]">
+            显示 24 / 24
+          </span>
+        </div>
+        <div class="flex items-center gap-3 text-xs text-[var(--muted-foreground)]">
+          <span>点击卡片展开参数拼装</span>
+          <span aria-hidden="true">·</span>
+          <span>点击星标加入常用收藏</span>
+        </div>
+      </div>
+
+      <div id="commands-grid" class="grid grid-cols-1 sm:grid-cols-2 gap-3"></div>
+
+      <!-- 空状态 -->
+      <div id="empty-state" class="hidden glass-card rounded-2xl p-8 text-center space-y-3">
+        <p class="text-sm font-medium text-[var(--foreground)]">没有找到匹配的指令</p>
+        <p class="text-xs text-[var(--muted-foreground)]">可以尝试搜索中文动词（如“搜索”、“对比”、“记忆”、“并行”）或重置筛选条件。</p>
+        <button
+          id="reset-filters-btn"
+          type="button"
+          class="text-xs px-3 py-1.5 rounded-lg bg-[var(--primary)] text-[var(--primary-foreground)] font-medium hover:opacity-90 transition-opacity"
+        >
+          重置全部筛选
+        </button>
+      </div>
+    </section>
+
+    <!-- 底部极简速查提示 -->
+    <footer class="pt-2 pb-6 border-t border-[var(--card-border)] flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-[var(--muted-foreground)]">
+      <div>
+        快捷别名：<code class="cmd-mono text-[var(--code-foreground)]">/hub</code> 控制台 ·
+        <code class="cmd-mono text-[var(--code-foreground)]">/nf</code> 新功能 ·
+        <code class="cmd-mono text-[var(--code-foreground)]">/dbg</code> 排障 ·
+        <code class="cmd-mono text-[var(--code-foreground)]">/ctx</code> 减负 ·
+        <code class="cmd-mono text-[var(--code-foreground)]">/cmd</code> 中文路由
+      </div>
+      <div>按 <kbd class="cmd-mono px-1.5 py-0.5 rounded border border-[var(--border)] bg-[var(--secondary)]">/</kbd> 聚焦搜索 · 收藏自动保存于本地</div>
+    </footer>
+  </main>
+
+  <!-- 轻量玻璃 Toast -->
+  <div id="toast" class="hidden fixed bottom-5 right-5 z-50 glass-toast rounded-xl px-3.5 py-2.5 flex items-center gap-2 max-w-sm">
+    <svg class="w-4 h-4 text-[var(--success)] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+    <span id="toast-text" class="text-xs font-medium text-[var(--foreground)] truncate">已复制到剪贴板</span>
+  </div>
+
+  <script>
+    // =========================================================================
+    // 可配置数据区：如需增删组合流或单指令，直接修改 WORKFLOWS 或 COMMANDS 数组即可
+    // =========================================================================
+
+    const CATEGORIES = [
+      { id: "all", label: "全部指令", colorToken: "--primary" },
+      { id: "favorites", label: "常用收藏", colorToken: "--warning" },
+      { id: "req", label: "需求与执行", colorToken: "--chart-1" },
+      { id: "multi", label: "多智能体攻坚", colorToken: "--chart-2" },
+      { id: "debug", label: "调试与可视化", colorToken: "--chart-3" },
+      { id: "session", label: "上下文与会话", colorToken: "--chart-4" },
+      { id: "custom", label: "定制与工程", colorToken: "--chart-5" }
+    ];
+
+    const ENV_FILTERS = [
+      { id: "all", label: "全部环境" },
+      { id: "universal", label: "通用" },
+      { id: "app", label: "App 可用" },
+      { id: "cli", label: "CLI 可用" },
+      { id: "high-quota", label: "⚠️ 高配额" }
+    ];
+
+    const WORKFLOWS = [
+      {
+        id: "nf",
+        alias: "/nf",
+        title: "新功能标准流",
+        subtitle: "先对齐再规划，确认后实施，结束不忘沉淀",
+        accentToken: "--chart-1",
+        env: "通用",
+        steps: ["/grill-me 反问对齐", "/plan 出方案", "确认执行", "/learn 沉淀"],
+        placeholder: "输入功能目标，例如：为订单模块增加幂等校验",
+        buildFullPrompt: (arg) => {
+          const target = arg ? `目标任务：${arg}。` : "请先询问我本次要实现的新功能目标。";
+          return `请严格按「新功能标准流」推进：1) 先用 /grill-me 风格一次一问对齐需求与边界；2) 输出可审阅的 /plan 实施计划并等我确认；3) 确认后再动手编码与自测；4) 完成后提醒我是否用 /learn 沉淀规范。${target}`;
+        }
+      },
+      {
+        id: "dbg",
+        alias: "/dbg",
+        title: "硬核排障流",
+        subtitle: "变更检索缩小现场，疑难升级深挖，前端联动实测",
+        accentToken: "--chart-3",
+        env: "通用（CLI/付费增强）",
+        steps: ["/diff + /codesearch", "根因定位", "/boost 深挖", "/browser 验收"],
+        placeholder: "输入报错现象或模块路径，例如：支付回调偶发超时",
+        buildFullPrompt: (arg) => {
+          const target = arg ? `排查对象：${arg}。` : "请先让我提供报错现象或复现步骤。";
+          return `请按「硬核排障流」协助排查：1) 先比对近期改动（CLI 可用 /diff）并全库检索关键符号（CLI 可用 /codesearch）；2) 提出假设并最小化复现验证；3) 若为复杂并发/算法难题再建议升级 /boost（注意高配额与付费限制）；4) 若属前端页面问题则联动 /browser 实机验证。${target}`;
+        }
+      },
+      {
+        id: "ctx",
+        alias: "/ctx",
+        title: "长对话减负流",
+        subtitle: "先看上下文占比，生成高质量检查点再安全瘦身",
+        accentToken: "--chart-4",
+        env: "App / CLI",
+        steps: ["评估上下文占用", "/compact 压缩检查点", "提炼关键决策"],
+        placeholder: "输入压缩后要继续做的事，例如：继续补齐单元测试",
+        buildFullPrompt: (arg) => {
+          const next = arg ? `压缩后继续执行：${arg}。` : "";
+          return `请按「长对话减负流」帮我整理当前会话：1) 评估上下文占用（CLI 提示用 /context，App 提示查看 Context Monitor）；2) 提炼关键文件路径、已确认决策与未完成事项，生成一条可直接复制的 /compact 检查点指令；3) 列出值得用 /learn 长期沉淀的经验。${next}`;
+        }
+      }
+    ];
+
+    const COMMANDS = [
+      // 1. 需求与执行 (5)
+      {
+        id: "grill-me",
+        cmd: "/grill-me",
+        aliases: [],
+        cat: "req",
+        env: "通用",
+        envKey: ["universal", "app", "cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "动工前逐条反问对齐需求细节，每题附带推荐默认答案。",
+        placeholder: "可选：简述想做的需求（如：重构用户登录鉴权）",
+        keywords: "需求 对齐 反问 别急着写 问清楚 澄清 访谈",
+        defaultArgs: ""
+      },
+      {
+        id: "plan",
+        cmd: "/plan",
+        aliases: [],
+        cat: "req",
+        env: "通用",
+        envKey: ["universal", "app", "cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "只读调研代码库并起草可审阅的实施计划，确认前不改代码。",
+        placeholder: "输入规划任务（如：支持 OIDC Token 校验与 JWKS 缓存）",
+        keywords: "计划 方案 设计 先出方案 规划 不动代码",
+        defaultArgs: ""
+      },
+      {
+        id: "goal",
+        cmd: "/goal",
+        aliases: [],
+        cat: "req",
+        env: "通用",
+        envKey: ["universal", "app", "cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "设定清晰验收标准，让 Agent 自主闭环开发与自测直至通过。",
+        placeholder: "必填：明确验收目标（如：修复所有单测并确保构建通过）",
+        keywords: "目标 闭环 自测 自主 完成 跑通 测试",
+        defaultArgs: ""
+      },
+      {
+        id: "schedule",
+        cmd: "/schedule",
+        aliases: [],
+        cat: "req",
+        env: "通用",
+        envKey: ["universal", "app", "cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "在当前会话内设置一次性延时唤醒或 Cron 周期巡检任务。",
+        placeholder: "输入时间与任务（如：\"0 9 * * 1-5\" 汇总待审 PR）",
+        keywords: "定时 巡检 提醒 周期 cron 闹钟",
+        defaultArgs: ""
+      },
+      {
+        id: "automation",
+        cmd: "/automation",
+        aliases: [],
+        cat: "req",
+        env: "仅 App",
+        envKey: ["app"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "通过对话向导创建独立后台定时自动化任务（Automations 页管理）。",
+        placeholder: "可选：描述周期任务（如：每周一早 9 点检查失败 CI）",
+        keywords: "自动化 后台 定时 巡检 日报 周报 app",
+        defaultArgs: ""
+      },
+
+      // 2. 多智能体攻坚 (3)
+      {
+        id: "boost",
+        cmd: "/boost",
+        aliases: [],
+        cat: "multi",
+        env: "通用",
+        envKey: ["universal", "app", "cli"],
+        highQuota: true,
+        paidOnly: true,
+        summary: "启动按需多代理深度推理循环，专攻顽固 Bug、竞态条件与复杂算法。",
+        placeholder: "输入高难度问题（如：排查高并发下连接池偶发死锁）",
+        keywords: "疑难 深挖 推理 竞态 死锁 算法 高配额 付费",
+        defaultArgs: ""
+      },
+      {
+        id: "swarm",
+        cmd: "/swarm",
+        aliases: [],
+        cat: "multi",
+        env: "App / CLI",
+        envKey: ["app", "cli"],
+        highQuota: true,
+        paidOnly: false,
+        summary: "拆分独立模块给多个命名工人并行开发，并配校验者协同验收。",
+        placeholder: "输入可拆分任务（如：同时重构 parser、tests 与文档）",
+        keywords: "并行 多模块 拆模块 协同 看板 高配额",
+        defaultArgs: ""
+      },
+      {
+        id: "teamwork",
+        cmd: "/teamwork",
+        aliases: [],
+        cat: "multi",
+        env: "通用",
+        envKey: ["universal", "app", "cli"],
+        highQuota: true,
+        paidOnly: true,
+        summary: "拉起协同代理团队，适用于跨多天大型工程迁移、重构与深度研究。",
+        placeholder: "输入大型项目目标（如：将前端从 Webpack 迁移到 Vite）",
+        keywords: "团队 大型项目 迁移 重构 长周期 高配额 付费",
+        defaultArgs: ""
+      },
+
+      // 3. 调试与可视化 (4)
+      {
+        id: "browser",
+        cmd: "/browser",
+        aliases: [],
+        cat: "debug",
+        env: "通用",
+        envKey: ["universal", "app", "cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "委派内置浏览器子代理打开页面、交互点检、截图与前端视觉验收。",
+        placeholder: "输入 URL 与验收项（如：打开 http://localhost:3000 检查图表渲染）",
+        keywords: "浏览器 前端 页面 截图 验收 UI 控制台 调试",
+        defaultArgs: ""
+      },
+      {
+        id: "generative_ui",
+        cmd: "/generative_ui",
+        aliases: [],
+        cat: "debug",
+        env: "仅 App",
+        envKey: ["app"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "生成交互式 HTML 流程图、数据图表或控件，在侧边栏或内联展示。",
+        placeholder: "描述想看的可视化组件（如：画出请求鉴权与限流交互流程图）",
+        keywords: "可视化 图表 交互 组件 界面 画图 面板 app",
+        defaultArgs: ""
+      },
+      {
+        id: "codesearch",
+        cmd: "/codesearch",
+        aliases: ["/cs", "/search"],
+        cat: "debug",
+        env: "仅 CLI",
+        envKey: ["cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "不中断当前对话，在终端交互式面板中全库检索代码符号与文本。",
+        placeholder: "输入搜索词或正则（如：verifyAuthToken）",
+        keywords: "搜索 全库 代码 检索 查找 cs search cli",
+        defaultArgs: ""
+      },
+      {
+        id: "diff",
+        cmd: "/diff",
+        aliases: [],
+        cat: "debug",
+        env: "仅 CLI",
+        envKey: ["cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "打开交互式 Diff 视图，对比当前工作区变更、对话轮次改动与提交。",
+        placeholder: "无需参数，可直接复制运行 /diff",
+        keywords: "对比 变更 差异 git diff 修改 cli",
+        defaultArgs: ""
+      },
+
+      // 4. 上下文与会话控制 (6)
+      {
+        id: "btw",
+        cmd: "/btw",
+        aliases: [],
+        cat: "session",
+        env: "通用",
+        envKey: ["universal", "app", "cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "在只读旁支中顺便问一个无关问题，不打断主线也不污染上下文历史。",
+        placeholder: "输入旁支问题（如：刚才提到的 UserSession 接口在哪个文件？）",
+        keywords: "旁支 顺便 提问 无关 只读 不污染 历史",
+        defaultArgs: ""
+      },
+      {
+        id: "compact",
+        cmd: "/compact",
+        aliases: [],
+        cat: "session",
+        env: "App / CLI",
+        envKey: ["app", "cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "将冗长对话摘要为紧凑检查点释放 Token，并可顺带指定下一步任务。",
+        placeholder: "可选：保留重点与下一步（如：保留接口结论，继续补单测）",
+        keywords: "压缩 整理 记忆 减负 摘要 检查点 太长",
+        defaultArgs: ""
+      },
+      {
+        id: "context",
+        cmd: "/context",
+        aliases: [],
+        cat: "session",
+        env: "仅 CLI",
+        envKey: ["cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "打开上下文窗口占用可视化面板，查看各类 Token 明细比例。",
+        placeholder: "无需参数，可直接复制运行 /context",
+        keywords: "上下文 token 占比 窗口 大小 cli",
+        defaultArgs: ""
+      },
+      {
+        id: "fork",
+        cmd: "/fork",
+        aliases: ["/branch"],
+        cat: "session",
+        env: "仅 CLI",
+        envKey: ["cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "从当前位置克隆出一条平行会话分支，方便互不干扰地对比试错。",
+        placeholder: "无需参数，可直接复制运行 /fork",
+        keywords: "分叉 分支 试错 克隆 会话 branch cli",
+        defaultArgs: ""
+      },
+      {
+        id: "rewind",
+        cmd: "/rewind",
+        aliases: ["/undo"],
+        cat: "session",
+        env: "仅 CLI",
+        envKey: ["cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "将当前对话历史回退到早先某个消息检查点，撤销误操作轮次。",
+        placeholder: "无需参数，可直接复制运行 /rewind",
+        keywords: "回退 撤销 回滚 检查点 刚才 undo cli",
+        defaultArgs: ""
+      },
+      {
+        id: "clear",
+        cmd: "/clear",
+        aliases: ["/new"],
+        cat: "session",
+        env: "仅 CLI",
+        envKey: ["cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "清屏并彻底重置当前会话上下文，开启全新对话。",
+        placeholder: "无需参数，可直接复制运行 /clear",
+        keywords: "清场 清屏 重置 新建 会话 new cli",
+        defaultArgs: ""
+      },
+
+      // 5. 定制与工程工具 (6)
+      {
+        id: "learn",
+        cmd: "/learn",
+        aliases: [],
+        cat: "custom",
+        env: "通用",
+        envKey: ["universal", "app", "cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "复盘本次对话中的纠错与踩坑，生成可审阅提案沉淀为 Rule 或 Skill。",
+        placeholder: "可选：指定要沉淀的经验（如：沉淀 Windows 路径兼容规范）",
+        keywords: "复盘 沉淀 踩坑 记住 规则 技能 总结",
+        defaultArgs: ""
+      },
+      {
+        id: "agy-customizations",
+        cmd: "/agy-customizations",
+        aliases: [],
+        cat: "custom",
+        env: "通用",
+        envKey: ["universal", "app", "cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "加载官方定制系统规范，辅助编写或排错插件、技能、规则与 Hooks。",
+        placeholder: "可选：定制诉求（如：帮我写一个提交前 lint 检查 Hook）",
+        keywords: "定制 配置 插件 技能 规则 hook mcp 规范",
+        defaultArgs: ""
+      },
+      {
+        id: "run-workflow",
+        cmd: "/run-workflow",
+        aliases: [],
+        cat: "custom",
+        env: "App / CLI",
+        envKey: ["app", "cli"],
+        highQuota: true,
+        paidOnly: false,
+        summary: "用 Python 脚本编排 parallel()/pipeline() 多阶段多代理流水线。",
+        placeholder: "输入批处理/流水线目标（如：逐文件并发审计 src/ 下接口安全）",
+        keywords: "工作流 脚本 编排 流水线 并发 批量 高配额",
+        defaultArgs: ""
+      },
+      {
+        id: "mcp",
+        cmd: "/mcp",
+        aliases: [],
+        cat: "custom",
+        env: "仅 CLI",
+        envKey: ["cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "打开终端交互式 MCP 服务器管理器，查看状态与工具列表。",
+        placeholder: "无需参数，可直接复制运行 /mcp",
+        keywords: "mcp 服务 工具 管理 服务器 cli",
+        defaultArgs: ""
+      },
+      {
+        id: "skills-reload",
+        cmd: "/skills reload",
+        aliases: ["/skills"],
+        cat: "custom",
+        env: "仅 CLI",
+        envKey: ["cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "从磁盘热重载本地与全局 Skills（运行 /skills 可浏览全部已加载技能）。",
+        placeholder: "无需参数，可直接复制运行 /skills reload",
+        keywords: "热重载 刷新 技能 skills reload 磁盘 cli",
+        defaultArgs: ""
+      },
+      {
+        id: "antigravity-guide",
+        cmd: "/antigravity-guide",
+        aliases: [],
+        cat: "custom",
+        env: "App / CLI",
+        envKey: ["app", "cli"],
+        highQuota: false,
+        paidOnly: false,
+        summary: "检索 Antigravity 官方文档，解答 CLI 参数、快捷键与平台配置问题。",
+        placeholder: "输入平台问题（如：如何配置 CLI 的 terminal sandbox？）",
+        keywords: "向导 文档 帮助 官方 怎么用 配置 指南",
+        defaultArgs: ""
+      }
+    ];
+
+    // =========================================================================
+    // 状态管理与持久化（localStorage 异常时自动降级内存 Set）
+    // =========================================================================
+    const STORAGE_KEY = "dev-command-hub:favorites:v1";
+    const state = {
+      search: "",
+      category: "all",
+      envFilter: "all",
+      expandedId: null,
+      favorites: new Set(),
+      inputs: {},
+      wfInputs: {}
+    };
+
+    function loadFavorites() {
+      try {
+        const raw = window.localStorage.getItem(STORAGE_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            state.favorites = new Set(parsed);
+          }
+        }
+      } catch (_) {
+        //沙盒/无存储权限时静默使用内存 Set
+      }
+    }
+
+    function saveFavorites() {
+      try {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify([...state.favorites]));
+      } catch (_) {
+        // 静默降级
+      }
+    }
+
+    function toggleFavorite(id) {
+      if (state.favorites.has(id)) {
+        state.favorites.delete(id);
+      } else {
+        state.favorites.add(id);
+      }
+      saveFavorites();
+      renderTabs();
+      renderCommands();
+    }
+
+    // =========================================================================
+    // 剪贴板复制与 Toast 反馈
+    // =========================================================================
+    let toastTimer = null;
+
+    function showToast(msg) {
+      const toast = document.getElementById("toast");
+      const textEl = document.getElementById("toast-text");
+      textEl.textContent = msg;
+      toast.classList.remove("hidden");
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => {
+        toast.classList.add("hidden");
+      }, 2200);
+    }
+
+    async function copyText(value) {
+      const text = (value || "").trim();
+      if (!text) return;
+      let ok = false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+          ok = true;
+        }
+      } catch (_) {
+        ok = false;
+      }
+      if (!ok) {
+        try {
+          const ta = document.createElement("textarea");
+          ta.value = text;
+          ta.setAttribute("readonly", "");
+          ta.style.position = "fixed";
+          ta.style.left = "-9999px";
+          document.body.appendChild(ta);
+          ta.select();
+          ok = document.execCommand("copy");
+          document.body.removeChild(ta);
+        } catch (_) {
+          ok = false;
+        }
+      }
+      const preview = text.length > 42 ? text.slice(0, 42) + "…" : text;
+      showToast(ok ? `已复制：${preview}` : "复制失败，请手动选中复制");
+    }
+
+    // =========================================================================
+    // 过滤与计算辅助
+    // =========================================================================
+    function getCategoryMeta(catId) {
+      return CATEGORIES.find((c) => c.id === catId) || CATEGORIES[0];
+    }
+
+    function matchesSearch(item, q) {
+      if (!q) return true;
+      const hay = [
+        item.cmd,
+        ...(item.aliases || []),
+        item.summary,
+        item.env,
+        item.keywords,
+        getCategoryMeta(item.cat).label
+      ]
+        .join(" ")
+        .toLowerCase();
+      return q
+        .toLowerCase()
+        .split(/\s+/)
+        .filter(Boolean)
+        .every((token) => hay.includes(token));
+    }
+
+    function matchesEnv(item, envFilter) {
+      if (envFilter === "all") return true;
+      if (envFilter === "high-quota") return Boolean(item.highQuota);
+      return item.envKey.includes(envFilter);
+    }
+
+    function getFilteredCommands() {
+      return COMMANDS.filter((item) => {
+        if (state.category === "favorites" && !state.favorites.has(item.id)) return false;
+        if (state.category !== "all" && state.category !== "favorites" && item.cat !== state.category) return false;
+        if (!matchesEnv(item, state.envFilter)) return false;
+        if (!matchesSearch(item, state.search)) return false;
+        return true;
+      });
+    }
+
+    function assembleCommand(item) {
+      const arg = (state.inputs[item.id] ?? item.defaultArgs ?? "").trim();
+      return arg ? `${item.cmd} ${arg}` : item.cmd;
+    }
+
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    // =========================================================================
+    // 渲染函数
+    // =========================================================================
+    function renderTabs() {
+      const tabsEl = document.getElementById("category-tabs");
+      tabsEl.innerHTML = CATEGORIES.map((cat) => {
+        let count = 0;
+        if (cat.id === "all") count = COMMANDS.length;
+        else if (cat.id === "favorites") count = state.favorites.size;
+        else count = COMMANDS.filter((c) => c.cat === cat.id).length;
+
+        const active = state.category === cat.id;
+        return `
+          <button
+            type="button"
+            data-cat="${cat.id}"
+            class="glass-pill ${active ? "is-active" : ""} inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium whitespace-nowrap shrink-0"
+          >
+            <span class="w-2 h-2 rounded-full shrink-0" style="background-color: var(${cat.colorToken}); opacity: 0.85;"></span>
+            <span>${escapeHtml(cat.label)}</span>
+            <span class="cmd-mono text-xs opacity-75">${count}</span>
+          </button>
+        `;
+      }).join("");
+
+      const envEl = document.getElementById("env-pills");
+      envEl.innerHTML = ENV_FILTERS.map((ef) => {
+        const active = state.envFilter === ef.id;
+        return `
+          <button
+            type="button"
+            data-env="${ef.id}"
+            class="glass-pill ${active ? "is-active" : ""} px-2.5 py-1 rounded-lg text-xs whitespace-nowrap shrink-0"
+          >
+            ${escapeHtml(ef.label)}
+          </button>
+        `;
+      }).join("");
+    }
+
+    function renderWorkflows() {
+      const grid = document.getElementById("workflows-grid");
+      grid.innerHTML = WORKFLOWS.map((wf) => {
+        const val = state.wfInputs[wf.id] || "";
+        const stepHtml = wf.steps
+          .map(
+            (s, i) => `
+              <span class="inline-flex items-center gap-1">
+                <span class="px-2 py-0.5 rounded-md text-xs border border-[var(--border)] bg-[var(--secondary)] text-[var(--foreground)]">${escapeHtml(s)}</span>
+                ${i < wf.steps.length - 1 ? '<span class="text-[var(--muted-foreground)]">→</span>' : ""}
+              </span>
+            `
+          )
+          .join("");
+
+        return `
+          <article class="glass-hero rounded-2xl p-4 flex flex-col justify-between gap-3 relative overflow-hidden">
+            <div class="absolute inset-x-0 top-0 h-0.5" style="background: linear-gradient(90deg, var(${wf.accentToken}), transparent);"></div>
+            <div class="space-y-2.5">
+              <div class="flex items-start justify-between gap-2">
+                <div>
+                  <div class="flex items-center gap-2">
+                    <code class="cmd-mono text-sm font-semibold px-2 py-0.5 rounded-md border border-[var(--border)]"
+                          style="background-color: color-mix(in srgb, var(${wf.accentToken}) 16%, transparent); color: var(--foreground);">
+                      ${escapeHtml(wf.alias)}
+                    </code>
+                    <h3 class="text-sm font-semibold text-[var(--foreground)]">${escapeHtml(wf.title)}</h3>
+                  </div>
+                  <p class="text-xs text-[var(--muted-foreground)] mt-1 leading-relaxed">${escapeHtml(wf.subtitle)}</p>
+                </div>
+                <span class="text-xs px-2 py-0.5 rounded-full border border-[var(--border)] bg-[var(--secondary)] text-[var(--muted-foreground)] shrink-0">
+                  ${escapeHtml(wf.env)}
+                </span>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-1 pt-0.5">
+                ${stepHtml}
+              </div>
+            </div>
+
+            <div class="space-y-2 pt-1 border-t border-[var(--card-border)]">
+              <input
+                type="text"
+                data-wf-input="${wf.id}"
+                value="${escapeHtml(val)}"
+                placeholder="${escapeHtml(wf.placeholder)}"
+                class="glass-input w-full rounded-lg px-2.5 py-1.5 text-xs"
+              />
+              <div class="flex items-center gap-2">
+                <button
+                  type="button"
+                  data-wf-copy-short="${wf.id}"
+                  class="flex-1 text-xs font-medium px-2.5 py-1.5 rounded-lg bg-[var(--primary)] text-[var(--primary-foreground)] hover:opacity-90 transition-opacity"
+                >
+                  复制 ${escapeHtml(wf.alias)}
+                </button>
+                <button
+                  type="button"
+                  data-wf-copy-full="${wf.id}"
+                  class="flex-1 text-xs font-medium px-2.5 py-1.5 rounded-lg border border-[var(--border)] bg-[var(--secondary)] text-[var(--secondary-foreground)] hover:border-[var(--primary)] transition-colors"
+                >
+                  复制完整编排词
+                </button>
+              </div>
+            </div>
+          </article>
+        `;
+      }).join("");
+    }
+
+    function renderEnvBadge(item) {
+      let style = "border-color: var(--border); background-color: var(--secondary); color: var(--muted-foreground);";
+      if (item.env === "仅 App") {
+        style = "border-color: color-mix(in srgb, var(--chart-3) 45%, transparent); background-color: color-mix(in srgb, var(--chart-3) 14%, transparent); color: var(--foreground);";
+      } else if (item.env === "仅 CLI") {
+        style = "border-color: color-mix(in srgb, var(--chart-4) 45%, transparent); background-color: color-mix(in srgb, var(--chart-4) 14%, transparent); color: var(--foreground);";
+      } else if (item.env === "通用") {
+        style = "border-color: color-mix(in srgb, var(--success) 40%, transparent); background-color: color-mix(in srgb, var(--success) 12%, transparent); color: var(--foreground);";
+      }
+      return `<span class="text-xs px-2 py-0.5 rounded-full border" style="${style}">${escapeHtml(item.env)}</span>`;
+    }
+
+    function renderCommands() {
+      const list = getFilteredCommands();
+      const grid = document.getElementById("commands-grid");
+      const empty = document.getElementById("empty-state");
+      const countEl = document.getElementById("visible-count");
+
+      countEl.textContent = `显示 ${list.length} / ${COMMANDS.length}`;
+
+      if (list.length === 0) {
+        grid.innerHTML = "";
+        empty.classList.remove("hidden");
+        return;
+      }
+
+      empty.classList.add("hidden");
+
+      grid.innerHTML = list
+        .map((item) => {
+          const catMeta = getCategoryMeta(item.cat);
+          const isFav = state.favorites.has(item.id);
+          const isOpen = state.expandedId === item.id;
+          const assembled = assembleCommand(item);
+          const inputVal = state.inputs[item.id] ?? "";
+          const aliasText = item.aliases.length ? `别名 ${item.aliases.join(" / ")}` : "";
+
+          return `
+            <article
+              data-card="${item.id}"
+              class="glass-card rounded-2xl p-3.5 pl-4 relative overflow-hidden cursor-pointer ${isOpen ? "ring-1 ring-[var(--primary)]" : ""}"
+            >
+              <!-- 低饱和分类左侧色标 -->
+              <span class="absolute left-0 top-3 bottom-3 w-1 rounded-r-full"
+                    style="background-color: var(${catMeta.colorToken}); opacity: 0.78;"></span>
+
+              <div class="flex items-start justify-between gap-2">
+                <div class="min-w-0 space-y-1">
+                  <div class="flex items-center gap-1.5 flex-wrap">
+                    <code class="cmd-mono text-sm font-semibold text-[var(--foreground)]">${escapeHtml(item.cmd)}</code>
+                    ${aliasText ? `<span class="cmd-mono text-xs text-[var(--muted-foreground)]">(${escapeHtml(aliasText)})</span>` : ""}
+                  </div>
+                  <div class="flex items-center gap-1.5 flex-wrap pt-0.5">
+                    ${renderEnvBadge(item)}
+                    <span class="text-xs px-2 py-0.5 rounded-full border border-[var(--border)] bg-[var(--secondary)] text-[var(--muted-foreground)]">
+                      ${escapeHtml(catMeta.label)}
+                    </span>
+                    ${
+                      item.highQuota
+                        ? `<span class="text-xs px-2 py-0.5 rounded-full border" style="border-color: color-mix(in srgb, var(--warning) 50%, transparent); background-color: color-mix(in srgb, var(--warning) 16%, transparent); color: var(--foreground);">⚠️ 高配额</span>`
+                        : ""
+                    }
+                    ${
+                      item.paidOnly
+                        ? `<span class="text-xs px-2 py-0.5 rounded-full border" style="border-color: color-mix(in srgb, var(--chart-2) 50%, transparent); background-color: color-mix(in srgb, var(--chart-2) 15%, transparent); color: var(--foreground);">付费计划</span>`
+                        : ""
+                    }
+                  </div>
+                </div>
+
+                <!-- 快捷动作区：一键复制 + 星标收藏 -->
+                <div class="flex items-center gap-1 shrink-0" data-no-toggle="true">
+                  <button
+                    type="button"
+                    data-quick-copy="${item.id}"
+                    class="text-xs px-2 py-1 rounded-lg border border-[var(--border)] bg-[var(--secondary)] text-[var(--foreground)] hover:border-[var(--primary)] transition-colors"
+                    title="直接复制指令"
+                  >
+                    复制
+                  </button>
+                  <button
+                    type="button"
+                    data-fav="${item.id}"
+                    aria-label="${isFav ? "取消收藏" : "加入收藏"}"
+                    class="p-1.5 rounded-lg border border-transparent hover:bg-[var(--secondary)] transition-colors"
+                    title="${isFav ? "取消收藏" : "加入常用收藏"}"
+                  >
+                    <svg class="w-4 h-4 ${isFav ? "text-[var(--warning)]" : "text-[var(--muted-foreground)]"}" viewBox="0 0 24 24" fill="${isFav ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+
+              <p class="text-xs text-[var(--muted-foreground)] mt-2 leading-relaxed">
+                ${escapeHtml(item.summary)}
+              </p>
+
+              ${
+                isOpen
+                  ? `
+                    <div class="mt-3 pt-3 border-t border-[var(--card-border)] space-y-2.5" data-no-toggle="true">
+                      <input
+                        type="text"
+                        data-cmd-input="${item.id}"
+                        value="${escapeHtml(inputVal)}"
+                        placeholder="${escapeHtml(item.placeholder)}"
+                        class="glass-input w-full rounded-lg px-2.5 py-1.5 text-xs"
+                      />
+                      <div class="rounded-lg px-2.5 py-2 border border-[var(--border)] bg-[var(--content)] flex items-center justify-between gap-2">
+                        <code data-preview="${item.id}" class="cmd-mono text-xs text-[var(--code-foreground)] break-all">${escapeHtml(assembled)}</code>
+                      </div>
+                      <div class="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          data-clear-input="${item.id}"
+                          class="text-xs px-2.5 py-1 rounded-lg border border-[var(--border)] text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                        >
+                          清空参数
+                        </button>
+                        <button
+                          type="button"
+                          data-copy-assembled="${item.id}"
+                          class="text-xs font-medium px-3 py-1 rounded-lg bg-[var(--primary)] text-[var(--primary-foreground)] hover:opacity-90 transition-opacity"
+                        >
+                          复制拼装指令
+                        </button>
+                      </div>
+                    </div>
+                  `
+                  : ""
+              }
+            </article>
+          `;
+        })
+        .join("");
+    }
+
+    // =========================================================================
+    // 事件绑定与主题监听
+    // =========================================================================
+    function syncSearchControls() {
+      const clearBtn = document.getElementById("clear-search-btn");
+      const kbdHint = document.getElementById("search-kbd-hint");
+      if (state.search.trim().length > 0) {
+        clearBtn.classList.remove("hidden");
+        kbdHint.classList.add("hidden");
+      } else {
+        clearBtn.classList.add("hidden");
+        kbdHint.classList.remove("hidden");
+      }
+    }
+
+    function bindEvents() {
+      const searchInput = document.getElementById("search-input");
+      const clearBtn = document.getElementById("clear-search-btn");
+      const resetBtn = document.getElementById("reset-filters-btn");
+
+      searchInput.addEventListener("input", (e) => {
+        state.search = e.target.value;
+        syncSearchControls();
+        renderCommands();
+      });
+
+      clearBtn.addEventListener("click", () => {
+        state.search = "";
+        searchInput.value = "";
+        syncSearchControls();
+        renderCommands();
+        searchInput.focus();
+      });
+
+      resetBtn.addEventListener("click", () => {
+        state.search = "";
+        state.category = "all";
+        state.envFilter = "all";
+        searchInput.value = "";
+        syncSearchControls();
+        renderTabs();
+        renderCommands();
+      });
+
+      // 键盘快捷键：/ 聚焦搜索，Esc 清空或收起卡片
+      document.addEventListener("keydown", (e) => {
+        const tag = document.activeElement && document.activeElement.tagName;
+        const isTyping = tag === "INPUT" || tag === "TEXTAREA";
+        if (e.key === "/" && !isTyping) {
+          e.preventDefault();
+          searchInput.focus();
+        } else if (e.key === "Escape") {
+          if (state.search) {
+            state.search = "";
+            searchInput.value = "";
+            syncSearchControls();
+            renderCommands();
+          } else if (state.expandedId) {
+            state.expandedId = null;
+            renderCommands();
+          }
+        }
+      });
+
+      // 分类 & 环境过滤点击委托
+      document.getElementById("category-tabs").addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-cat]");
+        if (!btn) return;
+        state.category = btn.getAttribute("data-cat");
+        renderTabs();
+        renderCommands();
+      });
+
+      document.getElementById("env-pills").addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-env]");
+        if (!btn) return;
+        state.envFilter = btn.getAttribute("data-env");
+        renderTabs();
+        renderCommands();
+      });
+
+      // 组合流区交互
+      const wfGrid = document.getElementById("workflows-grid");
+      wfGrid.addEventListener("input", (e) => {
+        const input = e.target.closest("[data-wf-input]");
+        if (!input) return;
+        state.wfInputs[input.getAttribute("data-wf-input")] = input.value;
+      });
+      wfGrid.addEventListener("click", (e) => {
+        const shortBtn = e.target.closest("[data-wf-copy-short]");
+        if (shortBtn) {
+          const id = shortBtn.getAttribute("data-wf-copy-short");
+          const wf = WORKFLOWS.find((w) => w.id === id);
+          if (!wf) return;
+          const arg = (state.wfInputs[id] || "").trim();
+          copyText(arg ? `${wf.alias} ${arg}` : wf.alias);
+          return;
+        }
+        const fullBtn = e.target.closest("[data-wf-copy-full]");
+        if (fullBtn) {
+          const id = fullBtn.getAttribute("data-wf-copy-full");
+          const wf = WORKFLOWS.find((w) => w.id === id);
+          if (!wf) return;
+          copyText(wf.buildFullPrompt((state.wfInputs[id] || "").trim()));
+        }
+      });
+
+      // 指令卡片区交互
+      const cmdGrid = document.getElementById("commands-grid");
+      cmdGrid.addEventListener("input", (e) => {
+        const input = e.target.closest("[data-cmd-input]");
+        if (!input) return;
+        const id = input.getAttribute("data-cmd-input");
+        state.inputs[id] = input.value;
+        const item = COMMANDS.find((c) => c.id === id);
+        const preview = cmdGrid.querySelector(`[data-preview="${id}"]`);
+        if (item && preview) {
+          preview.textContent = assembleCommand(item);
+        }
+      });
+
+      cmdGrid.addEventListener("click", (e) => {
+        const favBtn = e.target.closest("[data-fav]");
+        if (favBtn) {
+          e.stopPropagation();
+          toggleFavorite(favBtn.getAttribute("data-fav"));
+          return;
+        }
+
+        const quickCopyBtn = e.target.closest("[data-quick-copy]");
+        if (quickCopyBtn) {
+          e.stopPropagation();
+          const item = COMMANDS.find((c) => c.id === quickCopyBtn.getAttribute("data-quick-copy"));
+          if (item) copyText(assembleCommand(item));
+          return;
+        }
+
+        const copyAssembledBtn = e.target.closest("[data-copy-assembled]");
+        if (copyAssembledBtn) {
+          e.stopPropagation();
+          const item = COMMANDS.find((c) => c.id === copyAssembledBtn.getAttribute("data-copy-assembled"));
+          if (item) copyText(assembleCommand(item));
+          return;
+        }
+
+        const clearInputBtn = e.target.closest("[data-clear-input]");
+        if (clearInputBtn) {
+          e.stopPropagation();
+          const id = clearInputBtn.getAttribute("data-clear-input");
+          state.inputs[id] = "";
+          renderCommands();
+          const input = cmdGrid.querySelector(`[data-cmd-input="${id}"]`);
+          if (input) input.focus();
+          return;
+        }
+
+        if (e.target.closest("[data-no-toggle]")) return;
+
+        const card = e.target.closest("[data-card]");
+        if (!card) return;
+        const id = card.getAttribute("data-card");
+        state.expandedId = state.expandedId === id ? null : id;
+        renderCommands();
+        if (state.expandedId) {
+          const input = cmdGrid.querySelector(`[data-cmd-input="${id}"]`);
+          if (input) input.focus();
+        }
+      });
+
+      // 监听宿主明暗主题实时切换，保留交互状态
+      window.addEventListener("themechange", () => {
+        const isLight = document.documentElement.classList.contains("light");
+        document.body.dataset.theme = isLight ? "light" : "dark";
+      });
+    }
+
+    // 初始化
+    loadFavorites();
+    renderTabs();
+    renderWorkflows();
+    renderCommands();
+    bindEvents();
+  </script>
+</body>
+</html>

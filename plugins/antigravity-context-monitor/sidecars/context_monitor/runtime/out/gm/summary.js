@@ -1,0 +1,597 @@
+"use strict";
+// ─── GM Summary ──────────────────────────────────────────────────────────────
+// Summary aggregation, filtering, normalization, and merge utilities.
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.MAX_RECENT_ERRORS = void 0;
+exports.parseErrorCode = parseErrorCode;
+exports.normalizeErrorMessage = normalizeErrorMessage;
+exports.filterGMSummaryByModels = filterGMSummaryByModels;
+exports.mergeGMModelStats = mergeGMModelStats;
+exports.normalizeGMSummary = normalizeGMSummary;
+exports.buildSummaryFromConversations = buildSummaryFromConversations;
+const models_1 = require("../models");
+const telemetry_metrics_1 = require("../telemetry-metrics");
+const types_1 = require("./types");
+/** Maximum number of recent error messages to keep */
+exports.MAX_RECENT_ERRORS = 20;
+/**
+ * Parse an error message into a short error code for bucketing.
+ * Examples:
+ *   'RESOURCE_EXHAUSTED (code 429): You have...' → '429'
+ *   'UNAVAILABLE (code 503): No capacity...'     → '503'
+ *   'stream reading error: unexpected EOF...'     → 'stream_error'
+ *   'INVALID_ARGUMENT (code 400): ...'            → '400'
+ *   'unknown error message'                       → 'unknown'
+ */
+function parseErrorCode(errorMsg) {
+    // Pattern: (code NNN)
+    const codeMatch = errorMsg.match(/\(code\s+(\d{3})\)/);
+    if (codeMatch) {
+        return codeMatch[1];
+    }
+    // Pattern: gRPC/HTTP status codes like RESOURCE_EXHAUSTED, UNAVAILABLE
+    if (/RESOURCE_EXHAUSTED/i.test(errorMsg)) {
+        return '429';
+    }
+    if (/UNAVAILABLE/i.test(errorMsg)) {
+        return '503';
+    }
+    if (/INVALID_ARGUMENT/i.test(errorMsg)) {
+        return '400';
+    }
+    if (/PERMISSION_DENIED/i.test(errorMsg)) {
+        return '403';
+    }
+    if (/NOT_FOUND/i.test(errorMsg)) {
+        return '404';
+    }
+    if (/DEADLINE_EXCEEDED/i.test(errorMsg)) {
+        return '504';
+    }
+    if (/INTERNAL/i.test(errorMsg)) {
+        return '500';
+    }
+    // Stream errors
+    if (/stream.*error|unexpected.*EOF/i.test(errorMsg)) {
+        return 'stream_error';
+    }
+    // Timeout
+    if (/timeout/i.test(errorMsg)) {
+        return 'timeout';
+    }
+    return 'unknown';
+}
+/**
+ * Normalize an error message for content-based deduplication.
+ * Strips volatile parts (port numbers, reset wait times) while preserving
+ * the semantic identity of the error. Two errors are considered the same
+ * "kind" if their normalized forms match.
+ *
+ * Examples:
+ *   'RESOURCE_EXHAUSTED ... reset after 0s.'      → same kind as 'reset after 19h22m14s.'
+ *   'RESOURCE_EXHAUSTED ... reset after 3h12m38s.' → same kind as 'reset after 1s.'
+ *   'write tcp 198.18.0.1:14266->...:443'          → same kind as '198.18.0.1:5167->...:443'
+ */
+function normalizeErrorMessage(msg) {
+    // Bound input before regex normalization to avoid pathological backtracking.
+    let result = msg.length > 2000 ? msg.substring(0, 2000) : msg;
+    result = result
+        // ── Strip "model output error: " and "invalid tool call error (xxx) " prefixes ──
+        // The same underlying error can appear with or without these prefixes.
+        // Stripping them before other rules prevents near-duplicate entries.
+        .replace(/^model output error:\s*/i, '')
+        .replace(/^invalid tool call error\s*\([^)]*\)\s*/i, '')
+        // Strip "invalid_request_error: " prefix (Anthropic-style, may follow gRPC code)
+        .replace(/invalid_request_error:\s*/gi, '')
+        // ── Normalize quota reset wait times ──
+        // "Your quota will reset after 19h22m14s." → "reset after <time>"
+        .replace(/reset after \d+[hms][\dhms]*/g, 'reset after <time>')
+        // ── Normalize RESOURCE_EXHAUSTED suffix variations ──
+        // "You have exhausted your capacity on this model. Your quota will reset after <time>."
+        // "You have exhausted your capacity on this model."
+        // "Resource has been exhausted (e.g. check quota)."
+        // → all collapse to a single canonical form
+        .replace(/You have exhausted your capacity on this model\..*/i, 'quota exhausted.')
+        .replace(/Resource has been exhausted[\s\S]*/i, 'quota exhausted.')
+        // ── Normalize request failed URLs ──
+        // "request failed: Post \"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse\": <error>"
+        // → "request failed: Post \"<cloudcode-url>\": <error>"
+        // Different subdomains (daily-cloudcode-pa vs cloudcode-pa) are the same kind.
+        .replace(/Post\s+"https?:\/\/[^"]+"/g, 'Post "<cloudcode-url>"')
+        // ── Normalize TCP connection errors ──
+        // Source port: "198.18.0.1:14266->" → "198.18.0.1:PORT->"
+        .replace(/(\d+\.\d+\.\d+\.\d+):\d+(-\>)/g, '$1:PORT$2')
+        // Destination IP:port: "->198.18.0.57:443" → "->HOST:443"
+        .replace(/-\>\d+\.\d+\.\d+\.\d+:\d+/g, '->HOST:443')
+        // Collapse TCP-level error descriptions after the connection tuple:
+        // "write tcp ...: wsasend: An existing connection was forcibly closed..."
+        // "read tcp ...: wsarecv: A connection attempt failed because..."
+        // "read tcp ...: wsarecv: An existing connection was forcibly closed..."
+        // → all become "<tcp-error>"
+        .replace(/(?:read|write) tcp [^:]+:PORT->HOST:443:\s*wsa(?:send|recv):\s*.*/i, '<tcp-error>')
+        // ── Normalize "context canceled" variants ──
+        // "context canceled" vs "context canceled by user" → same kind
+        .replace(/context canceled(?:\s+by\s+\w+)?/gi, 'context canceled')
+        // ── Collapse all "request failed: Post <url>: <detail>" into one kind ──
+        // EOF, context canceled, TCP errors are all network interruptions.
+        .replace(/(request failed: Post "<cloudcode-url>"):\s*.+/i, '$1: <network-error>')
+        // ── Normalize stream reading errors ──
+        // "stream reading error: context canceled"
+        // "stream reading error: read tcp ...wsarecv..."
+        // "stream reading error: unexpected EOF"
+        // → collapse the detail after "stream reading error:"
+        .replace(/(stream reading error):\s*.+/i, '$1: <detail>')
+        // ── Normalize file paths ──
+        // "path does not exist: e:\Code\GodotDesktopPet\ui\game_manager.gd" → "path does not exist: <path>"
+        .replace(/(path does not exist):\s*\S+/gi, '$1: <path>')
+        // "does not exist in the current location. Make sure..." → normalize the path before it
+        .replace(/\S+\s+(does not exist in the current location)/gi, '<path> $1')
+        // "failed to read file: open e:/path/file.txt: The system cannot find..."
+        // "failed to read file: open e:/path/: The system cannot find the path..."
+        .replace(/(failed to read file: open )\S+/i, '$1<path>')
+        // "failed to read file: read e:/path/shared: Incorrect function."
+        .replace(/(failed to read file: read )\S+/i, '$1<path>')
+        // ── Normalize artifact path errors ──
+        // "e:\AI\1\Claude\1\X.md is not a valid artifact path; artifacts must be in C:\Users\...\brain\UUID/"
+        // → "<path> is not a valid artifact path"
+        .replace(/\S+\s+(is not a valid artifact path)[^"]*/gi, '<path> $1')
+        // "project_abstract_translation.md must be an absolute path: path is not absolute"
+        // → "<file> must be an absolute path"
+        .replace(/\S+\s+(must be an absolute path)/gi, '<file> $1')
+        // ── Normalize max tokens limit ──
+        // "generation exceeded max tokens limit. Please generate a message within the token limit (16384)"
+        // "generation exceeded max tokens limit. Please generate a message within the token limit (64000)"
+        // → "generation exceeded max tokens limit (<N>)"
+        .replace(/(generation exceeded max tokens limit)[^(]*\((\d+)\)/gi, '$1 (<N>)')
+        // ── Normalize model capacity errors ──
+        // "No capacity available for model claude-opus-4-6-thinking on the server"
+        // "No capacity available for model gemini-pro-agent on the server"
+        // → "No capacity available for model <model> on the server"
+        .replace(/(No capacity available for model )\S+/gi, '$1<model>')
+        // ── Normalize image processing errors ──
+        // "Could not process image" and "Unable to process input image..."
+        // → unified form, strip trailing details
+        .replace(/Unable to process input image[\s\S]*/gi, 'Could not process image')
+        .replace(/(Could not process image)[\s\S]*/gi, '$1')
+        // ── Normalize ReplacementChunks JSON format errors ──
+        // Long unmarshal error messages — keep only the signature prefix
+        .replace(/(ReplacementChunks should be a JSON array, not a string-escaped JSON array)[\s\S]*/i, '$1')
+        // ── Normalize Malformed function call errors ──
+        // "encountered an improper format stop reason: Malformed function call: thought\nCRITICAL..."
+        // "encountered an improper format stop reason: Malformed function call: .\nPlease retry..."
+        .replace(/(Malformed function call):\s*[\s\S]*/i, '$1')
+        // ── Normalize looping content detection ──
+        .replace(/(flagged for looping content)[\s\S]*/i, '$1')
+        // ── Normalize unknown tool name ──
+        // "unknown tool name: `mcp_mcp-my-memory_mem_profile`"
+        // "unknown tool name: `find_by_name`"
+        .replace(/(unknown tool name):\s*\S+/gi, '$1: <tool>')
+        // ── Normalize unsupported mime type ──
+        .replace(/(unsupported mime type)\s+.+/gi, '$1 <type>')
+        // ── Normalize INTERNAL errors ──
+        // "INTERNAL (code 500): Internal error encountered." — already unique, no-op
+        // ── Normalize "The service is currently unavailable" ──
+        // Already covered by 503 code bucketing, but keep text consistent
+        // Trim trailing whitespace
+        .trim();
+    // ── Collapse API-duplicated messages: "MSG.: MSG." → "MSG." ──
+    let searchFrom = 0;
+    while (searchFrom < result.length) {
+        const colonIdx = result.indexOf(': ', searchFrom);
+        if (colonIdx < 0 || colonIdx >= result.length - 2) {
+            break;
+        }
+        const first = result.substring(0, colonIdx);
+        const second = result.substring(colonIdx + 2);
+        if (first === second) {
+            result = first;
+            break;
+        }
+        searchFrom = colonIdx + 2;
+    }
+    // ── Truncate unmarshal / JSON-body errors ──
+    result = result.replace(/(trying to unmarshal args to )\{[\s\S]*/m, '$1{…}');
+    // General max-length truncation
+    if (result.length > 300) {
+        result = result.substring(0, 297) + '...';
+    }
+    return result;
+}
+/** Aggregate retryErrors from a call into error code counts and recent errors list */
+function aggregateRetryErrors(call, retryErrorCodes, recentErrors) {
+    for (const errMsg of call.retryErrors) {
+        const code = parseErrorCode(errMsg);
+        retryErrorCodes[code] = (retryErrorCodes[code] || 0) + 1;
+        if (recentErrors.length < exports.MAX_RECENT_ERRORS) {
+            recentErrors.push(errMsg);
+        }
+    }
+    // Fallback: use top-level errorMessage only when retryErrors is empty
+    if (call.hasError && call.errorMessage && call.retryErrors.length === 0) {
+        const code = parseErrorCode(call.errorMessage);
+        retryErrorCodes[code] = (retryErrorCodes[code] || 0) + 1;
+        if (recentErrors.length < exports.MAX_RECENT_ERRORS) {
+            recentErrors.push(call.errorMessage);
+        }
+    }
+}
+/** Build a single-call GMModelStats entry with accurate timing sample counts and timed speed sums. */
+function buildSingleCallModelStats(call) {
+    const hasTtft = Number.isFinite(call.ttftSeconds) && call.ttftSeconds > 0;
+    const hasStream = Number.isFinite(call.streamingSeconds) && call.streamingSeconds > 0;
+    const isSpeedValid = hasStream
+        && call.streamingSeconds >= telemetry_metrics_1.MIN_STREAM_SECONDS
+        && call.outputTokens >= telemetry_metrics_1.MIN_OUTPUT_TOKENS_FOR_SPEED;
+    const hasCacheHit = call.cacheReadTokens > 0;
+    return {
+        callCount: 1,
+        stepsCovered: call.stepIndices.length,
+        totalInputTokens: call.inputTokens,
+        totalOutputTokens: call.outputTokens,
+        totalThinkingTokens: call.thinkingTokens,
+        totalCacheRead: call.cacheReadTokens,
+        totalCacheCreation: call.cacheCreationTokens,
+        totalCredits: call.credits,
+        avgTTFT: hasTtft ? call.ttftSeconds : 0,
+        minTTFT: hasTtft ? call.ttftSeconds : 0,
+        maxTTFT: hasTtft ? call.ttftSeconds : 0,
+        avgStreaming: hasStream ? call.streamingSeconds : 0,
+        cacheHitRate: hasCacheHit ? 1 : 0,
+        ttftSampleCount: hasTtft ? 1 : 0,
+        streamingSampleCount: hasStream ? 1 : 0,
+        timedOutputTokens: isSpeedValid ? call.outputTokens : 0,
+        timedStreamingSeconds: isSpeedValid ? call.streamingSeconds : 0,
+        cacheHitCalls: hasCacheHit ? 1 : 0,
+        responseModel: call.responseModel,
+        apiProvider: call.apiProvider,
+        completionConfig: call.completionConfig,
+        hasSystemPrompt: !!call.systemPromptSnippet,
+        toolCount: call.toolCount,
+        promptSectionTitles: [...call.promptSectionTitles],
+        totalRetries: call.retries,
+        errorCount: call.hasError ? 1 : 0,
+        creditCallCount: call.credits > 0 ? 1 : 0,
+        exactCallCount: call.modelAccuracy === 'exact' ? 1 : 0,
+        placeholderOnlyCalls: call.modelAccuracy === 'placeholder' ? 1 : 0,
+        contextWindowCapacity: call.contextWindowCapacity || 0,
+    };
+}
+function filterGMSummaryByModels(summary, modelIds) {
+    if (!summary || modelIds.length === 0) {
+        return null;
+    }
+    const modelSet = new Set(modelIds);
+    const conversations = [];
+    const modelBreakdown = {};
+    const stopReasonCounts = {};
+    const toolCallCounts = {};
+    const retryErrorCodes = {};
+    const recentErrors = [];
+    const contextGrowth = [];
+    let totalCalls = 0;
+    let totalStepsCovered = 0;
+    let totalCredits = 0;
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalCacheRead = 0;
+    let totalCacheCreation = 0;
+    let totalThinkingTokens = 0;
+    let totalRetryTokens = 0;
+    let totalRetryCredits = 0;
+    let totalRetryCount = 0;
+    let latestTokenBreakdown = [];
+    for (const conversation of summary.conversations) {
+        const matchingCalls = conversation.calls.filter(call => modelSet.has(call.model));
+        if (matchingCalls.length === 0) {
+            continue;
+        }
+        const calls = matchingCalls.map(call => ({
+            ...call,
+            modelDisplay: (0, models_1.normalizeModelDisplayName)(call.modelDisplay || call.model) || call.modelDisplay || call.model,
+        }));
+        const coveredSteps = calls.reduce((sum, call) => sum + call.stepIndices.length, 0);
+        conversations.push({
+            ...conversation,
+            calls,
+            lifetimeCalls: calls.length,
+            coveredSteps,
+            coverageRate: conversation.totalSteps > 0 ? coveredSteps / conversation.totalSteps : 0,
+            checkpointSummaries: conversation.checkpointSummaries || [],
+        });
+        for (const call of calls) {
+            const normalizedDisplay = (0, models_1.normalizeModelDisplayName)(call.modelDisplay || call.model) || call.modelDisplay || call.model;
+            totalCalls++;
+            totalStepsCovered += call.stepIndices.length;
+            totalCredits += call.credits;
+            totalInputTokens += call.inputTokens;
+            totalOutputTokens += call.outputTokens;
+            totalCacheRead += call.cacheReadTokens;
+            totalCacheCreation += call.cacheCreationTokens;
+            totalThinkingTokens += call.thinkingTokens;
+            totalRetryTokens += call.retryTokensIn + call.retryTokensOut;
+            totalRetryCredits += call.retryCredits;
+            if (call.retries > 0) {
+                totalRetryCount++;
+            }
+            if (call.contextTokensUsed > 0 && call.stepIndices.length > 0) {
+                contextGrowth.push({
+                    step: call.stepIndices[0],
+                    tokens: call.contextTokensUsed,
+                    model: normalizedDisplay || call.modelDisplay,
+                });
+            }
+            if (call.stopReason) {
+                const stopReason = call.stopReason.replace('STOP_REASON_', '');
+                stopReasonCounts[stopReason] = (stopReasonCounts[stopReason] || 0) + 1;
+            }
+            // Aggregate error codes from retryErrors
+            aggregateRetryErrors(call, retryErrorCodes, recentErrors);
+            // Aggregate tool call counts from source summary (preserves existing counts)
+            // Note: toolCallsByStep-based counting happens in _buildSummary();
+            // here we just pass through any pre-computed counts from the source.
+            if (call.tokenBreakdownGroups.length > 0) {
+                latestTokenBreakdown = call.tokenBreakdownGroups;
+            }
+            const key = normalizedDisplay || call.modelDisplay || call.model;
+            const single = buildSingleCallModelStats(call);
+            const existing = modelBreakdown[key];
+            if (existing) {
+                mergeGMModelStats(existing, single);
+            }
+            else {
+                modelBreakdown[key] = single;
+            }
+        }
+    }
+    if (totalCalls === 0) {
+        return null;
+    }
+    conversations.sort((a, b) => b.totalSteps - a.totalSteps);
+    contextGrowth.sort((a, b) => a.step - b.step);
+    return {
+        conversations,
+        modelBreakdown,
+        totalCalls,
+        totalStepsCovered,
+        totalCredits,
+        totalInputTokens,
+        totalOutputTokens,
+        totalCacheRead,
+        totalCacheCreation,
+        totalThinkingTokens,
+        contextGrowth,
+        fetchedAt: summary.fetchedAt,
+        totalRetryTokens,
+        totalRetryCredits,
+        totalRetryCount,
+        latestTokenBreakdown,
+        stopReasonCounts,
+        retryErrorCodes,
+        recentErrors,
+        toolCallCounts: Object.keys(toolCallCounts).length > 0
+            ? toolCallCounts
+            : { ...(summary.toolCallCounts || {}) },
+    };
+}
+function mergeGMModelStats(target, source) {
+    const targetCallsBefore = target.callCount;
+    const sourceCalls = source.callCount;
+    const totalCalls = targetCallsBefore + sourceCalls;
+    target.callCount = totalCalls;
+    target.stepsCovered += source.stepsCovered;
+    target.totalInputTokens += source.totalInputTokens;
+    target.totalOutputTokens += source.totalOutputTokens;
+    target.totalThinkingTokens += source.totalThinkingTokens;
+    target.totalCacheRead += source.totalCacheRead;
+    target.totalCacheCreation += source.totalCacheCreation;
+    target.totalCredits += source.totalCredits;
+    target.minTTFT = target.minTTFT > 0 && source.minTTFT > 0
+        ? Math.min(target.minTTFT, source.minTTFT)
+        : Math.max(target.minTTFT, source.minTTFT);
+    target.maxTTFT = Math.max(target.maxTTFT, source.maxTTFT);
+    // Weight TTFT & streaming averages strictly by valid (> 0) sample counts,
+    // never by total callCount — prevents 0/missing timing calls from diluting averages.
+    const targetTtftSamples = target.ttftSampleCount !== undefined
+        ? target.ttftSampleCount
+        : (target.avgTTFT > 0 ? targetCallsBefore : 0);
+    const sourceTtftSamples = source.ttftSampleCount !== undefined
+        ? source.ttftSampleCount
+        : (source.avgTTFT > 0 ? sourceCalls : 0);
+    const totalTtftSamples = targetTtftSamples + sourceTtftSamples;
+    target.avgTTFT = totalTtftSamples > 0
+        ? ((target.avgTTFT * targetTtftSamples) + (source.avgTTFT * sourceTtftSamples)) / totalTtftSamples
+        : 0;
+    target.ttftSampleCount = totalTtftSamples;
+    const targetStreamSamples = target.streamingSampleCount !== undefined
+        ? target.streamingSampleCount
+        : (target.avgStreaming > 0 ? targetCallsBefore : 0);
+    const sourceStreamSamples = source.streamingSampleCount !== undefined
+        ? source.streamingSampleCount
+        : (source.avgStreaming > 0 ? sourceCalls : 0);
+    const totalStreamSamples = targetStreamSamples + sourceStreamSamples;
+    target.avgStreaming = totalStreamSamples > 0
+        ? ((target.avgStreaming * targetStreamSamples) + (source.avgStreaming * sourceStreamSamples)) / totalStreamSamples
+        : 0;
+    target.streamingSampleCount = totalStreamSamples;
+    if (target.timedOutputTokens !== undefined || source.timedOutputTokens !== undefined) {
+        target.timedOutputTokens = (target.timedOutputTokens || 0) + (source.timedOutputTokens || 0);
+    }
+    if (target.timedStreamingSeconds !== undefined || source.timedStreamingSeconds !== undefined) {
+        target.timedStreamingSeconds = (target.timedStreamingSeconds || 0) + (source.timedStreamingSeconds || 0);
+    }
+    const targetCacheHits = target.cacheHitCalls !== undefined
+        ? target.cacheHitCalls
+        : Math.round(target.cacheHitRate * targetCallsBefore);
+    const sourceCacheHits = source.cacheHitCalls !== undefined
+        ? source.cacheHitCalls
+        : Math.round(source.cacheHitRate * sourceCalls);
+    const totalCacheHits = targetCacheHits + sourceCacheHits;
+    target.cacheHitCalls = totalCacheHits;
+    target.cacheHitRate = totalCalls > 0 ? totalCacheHits / totalCalls : 0;
+    if (source.responseModel) {
+        target.responseModel = source.responseModel;
+    }
+    if (source.apiProvider) {
+        target.apiProvider = source.apiProvider;
+    }
+    if (source.completionConfig) {
+        target.completionConfig = source.completionConfig;
+    }
+    target.hasSystemPrompt = target.hasSystemPrompt || source.hasSystemPrompt;
+    target.toolCount = Math.max(target.toolCount, source.toolCount);
+    if (source.promptSectionTitles.length > target.promptSectionTitles.length) {
+        target.promptSectionTitles = [...source.promptSectionTitles];
+    }
+    target.totalRetries += source.totalRetries;
+    target.errorCount += source.errorCount;
+    target.creditCallCount = (target.creditCallCount || 0) + (source.creditCallCount || 0);
+    target.exactCallCount += source.exactCallCount;
+    target.placeholderOnlyCalls += source.placeholderOnlyCalls;
+    if (source.contextWindowCapacity > 0) {
+        target.contextWindowCapacity = source.contextWindowCapacity;
+    }
+}
+function normalizeGMSummary(summary) {
+    const normalizedConversations = summary.conversations.map(conversation => ({
+        ...conversation,
+        calls: conversation.calls.map(call => ({
+            ...call,
+            modelDisplay: (0, models_1.normalizeModelDisplayName)(call.modelDisplay || call.model) || call.modelDisplay || call.model,
+        })),
+    }));
+    const modelBreakdown = {};
+    for (const [name, stats] of Object.entries(summary.modelBreakdown)) {
+        const key = (0, models_1.normalizeModelDisplayName)(name) || name;
+        const existing = modelBreakdown[key];
+        if (existing) {
+            mergeGMModelStats(existing, stats);
+        }
+        else {
+            modelBreakdown[key] = {
+                ...stats,
+                promptSectionTitles: [...stats.promptSectionTitles],
+                completionConfig: stats.completionConfig ? { ...stats.completionConfig } : null,
+            };
+        }
+    }
+    return {
+        ...summary,
+        conversations: normalizedConversations,
+        modelBreakdown,
+        contextGrowth: summary.contextGrowth.map(point => ({
+            ...point,
+            model: (0, models_1.normalizeModelDisplayName)(point.model) || point.model,
+        })),
+        latestTokenBreakdown: (0, types_1.cloneTokenBreakdownGroups)(summary.latestTokenBreakdown),
+        stopReasonCounts: { ...summary.stopReasonCounts },
+        retryErrorCodes: { ...(summary.retryErrorCodes || {}) },
+        recentErrors: [...(summary.recentErrors || [])],
+        toolCallCounts: { ...(summary.toolCallCounts || {}) },
+    };
+}
+function buildSummaryFromConversations(inputConversations, fetchedAt) {
+    const conversations = [];
+    const modelBreakdown = {};
+    const stopReasonCounts = {};
+    const retryErrorCodes = {};
+    const recentErrors = [];
+    const contextGrowth = [];
+    let totalCalls = 0;
+    let totalStepsCovered = 0;
+    let totalCredits = 0;
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalCacheRead = 0;
+    let totalCacheCreation = 0;
+    let totalThinkingTokens = 0;
+    let totalRetryTokens = 0;
+    let totalRetryCredits = 0;
+    let totalRetryCount = 0;
+    let latestTokenBreakdown = [];
+    for (const conversation of inputConversations) {
+        if (conversation.calls.length === 0) {
+            continue;
+        }
+        const calls = conversation.calls.map(call => ({
+            ...call,
+            modelDisplay: (0, models_1.normalizeModelDisplayName)(call.modelDisplay || call.model) || call.modelDisplay || call.model,
+        }));
+        const coveredSteps = calls.reduce((sum, call) => sum + call.stepIndices.length, 0);
+        conversations.push({
+            ...conversation,
+            calls,
+            coveredSteps,
+            coverageRate: conversation.totalSteps > 0 ? coveredSteps / conversation.totalSteps : 0,
+            checkpointSummaries: conversation.checkpointSummaries || [],
+        });
+        for (const call of calls) {
+            const normalizedDisplay = (0, models_1.normalizeModelDisplayName)(call.modelDisplay || call.model) || call.modelDisplay || call.model;
+            totalCalls++;
+            totalStepsCovered += call.stepIndices.length;
+            totalCredits += call.credits;
+            totalInputTokens += call.inputTokens;
+            totalOutputTokens += call.outputTokens;
+            totalCacheRead += call.cacheReadTokens;
+            totalCacheCreation += call.cacheCreationTokens;
+            totalThinkingTokens += call.thinkingTokens;
+            totalRetryTokens += call.retryTokensIn + call.retryTokensOut;
+            totalRetryCredits += call.retryCredits;
+            if (call.retries > 0) {
+                totalRetryCount++;
+            }
+            if (call.contextTokensUsed > 0 && call.stepIndices.length > 0) {
+                contextGrowth.push({
+                    step: call.stepIndices[0],
+                    tokens: call.contextTokensUsed,
+                    model: normalizedDisplay || call.modelDisplay,
+                });
+            }
+            if (call.stopReason) {
+                const stopReason = call.stopReason.replace('STOP_REASON_', '');
+                stopReasonCounts[stopReason] = (stopReasonCounts[stopReason] || 0) + 1;
+            }
+            // Aggregate error codes from retryErrors
+            aggregateRetryErrors(call, retryErrorCodes, recentErrors);
+            if (call.tokenBreakdownGroups.length > 0) {
+                latestTokenBreakdown = call.tokenBreakdownGroups;
+            }
+            const key = normalizedDisplay || call.modelDisplay || call.model;
+            const single = buildSingleCallModelStats(call);
+            const existing = modelBreakdown[key];
+            if (existing) {
+                mergeGMModelStats(existing, single);
+            }
+            else {
+                modelBreakdown[key] = single;
+            }
+        }
+    }
+    if (totalCalls === 0) {
+        return null;
+    }
+    conversations.sort((a, b) => b.totalSteps - a.totalSteps);
+    contextGrowth.sort((a, b) => a.step - b.step);
+    return {
+        conversations,
+        modelBreakdown,
+        totalCalls,
+        totalStepsCovered,
+        totalCredits,
+        totalInputTokens,
+        totalOutputTokens,
+        totalCacheRead,
+        totalCacheCreation,
+        totalThinkingTokens,
+        contextGrowth,
+        fetchedAt,
+        totalRetryTokens,
+        totalRetryCredits,
+        totalRetryCount,
+        latestTokenBreakdown,
+        stopReasonCounts,
+        retryErrorCodes,
+        recentErrors,
+        toolCallCounts: {},
+    };
+}
+//# sourceMappingURL=summary.js.map

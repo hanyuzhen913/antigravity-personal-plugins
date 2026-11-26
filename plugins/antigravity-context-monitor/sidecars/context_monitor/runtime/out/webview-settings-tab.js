@@ -1,0 +1,851 @@
+"use strict";
+// ─── Settings Tab Content Builder ────────────────────────────────────────────
+// Builds HTML for the "Settings" tab: storage diagnostics, App Ambient Overlays
+// (Opt-In CDP), Updates & Release Checks, Cost/Currency/History, quota threshold,
+// polling, collapsible IDE status bar toggles, advanced display, zoom, and panel prefs.
+//
+// Pure Node/TypeScript safe: ZERO top-level `vscode` import so Antigravity App
+// Sidecar and pure Node tests can render Settings without VS Code.
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS = void 0;
+exports.normalizeMonitorDocumentSettings = normalizeMonitorDocumentSettings;
+exports.registerSettingsProvider = registerSettingsProvider;
+exports.buildSettingsContent = buildSettingsContent;
+const i18n_core_1 = require("./i18n-core");
+const tooltip_budget_1 = require("./tooltip-budget");
+const cli_usage_scanner_1 = require("./cli-usage-scanner");
+const durable_state_1 = require("./durable-state");
+const webview_icons_1 = require("./webview-icons");
+const webview_helpers_1 = require("./webview-helpers");
+exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS = {
+    pollingInterval: 5,
+    quotaNotificationThreshold: 20,
+    showContext: true,
+    showQuota: true,
+    showResetCountdown: true,
+    showAiCredits: true,
+    showSpeed: false,
+    showCacheHit: false,
+    showSessionCost: false,
+    tooltipDensity: 'auto',
+    showModelInternalId: false,
+    maxRecentSteps: 100,
+    maxArchives: 20,
+    lockToMainAgent: false,
+    appComposerRingEnabled: false,
+    appTopBarEnabled: false,
+    showNativeHudBar: true,
+    orchestratorPricingMode: 'mapped',
+    displayCurrency: 'USD',
+    customFxRate: null,
+    subscriptionPlan: 'none',
+    subscriptionMonthlyFee: null,
+    subscriptionCurrency: 'USD',
+    calendarRetentionDays: 400,
+    autoCheckUpdates: true,
+    activityMaxRecentSteps: 100,
+    activityMaxArchives: 20,
+};
+function clampNumber(value, fallback, min, max) {
+    const n = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(n)) {
+        return fallback;
+    }
+    return Math.min(Math.max(Math.round(n), min), max);
+}
+function normalizeCurrency(value, fallback = 'USD') {
+    if (typeof value !== 'string') {
+        return fallback;
+    }
+    const upper = value.trim().toUpperCase();
+    return durable_state_1.SUPPORTED_DISPLAY_CURRENCIES.includes(upper)
+        ? upper
+        : fallback;
+}
+function normalizeNullablePositive(value, allowZero = false) {
+    if (value === null || value === undefined || value === '') {
+        return null;
+    }
+    const n = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(n)) {
+        return null;
+    }
+    if (allowZero ? n < 0 : n <= 0) {
+        return null;
+    }
+    return n;
+}
+function normalizeSubscriptionPlan(rawPlan, monthlyFee) {
+    return (0, cli_usage_scanner_1.normalizeSubscriptionPlanId)(rawPlan, monthlyFee);
+}
+/** Normalize partial plain settings into a complete, bounds-checked settings object. */
+function normalizeMonitorDocumentSettings(partial) {
+    const src = partial ?? {};
+    const maxRecentSteps = src.activityMaxRecentSteps !== undefined
+        ? clampNumber(src.activityMaxRecentSteps, 100, 10, 500)
+        : (src.maxRecentSteps !== undefined
+            ? clampNumber(src.maxRecentSteps, 100, 10, 500)
+            : exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.maxRecentSteps);
+    const maxArchives = src.activityMaxArchives !== undefined
+        ? clampNumber(src.activityMaxArchives, 20, 1, 100)
+        : (src.maxArchives !== undefined
+            ? clampNumber(src.maxArchives, 20, 1, 100)
+            : exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.maxArchives);
+    const subscriptionMonthlyFee = normalizeNullablePositive(src.subscriptionMonthlyFee, true);
+    const subscriptionPlan = normalizeSubscriptionPlan(src.subscriptionPlan, subscriptionMonthlyFee);
+    return {
+        pollingInterval: clampNumber(src.pollingInterval, exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.pollingInterval, 1, 60),
+        quotaNotificationThreshold: clampNumber(src.quotaNotificationThreshold, exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.quotaNotificationThreshold, 0, 99),
+        showContext: src.showContext ?? exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.showContext,
+        showQuota: src.showQuota ?? exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.showQuota,
+        showResetCountdown: src.showResetCountdown ?? exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.showResetCountdown,
+        showAiCredits: src.showAiCredits ?? exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.showAiCredits,
+        showSpeed: src.showSpeed ?? exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.showSpeed,
+        showCacheHit: src.showCacheHit ?? exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.showCacheHit,
+        showSessionCost: src.showSessionCost ?? exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.showSessionCost,
+        tooltipDensity: (0, tooltip_budget_1.parseTooltipDensity)(src.tooltipDensity ?? exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.tooltipDensity),
+        showModelInternalId: src.showModelInternalId ?? exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.showModelInternalId,
+        maxRecentSteps,
+        maxArchives,
+        lockToMainAgent: src.lockToMainAgent ?? exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.lockToMainAgent,
+        appComposerRingEnabled: typeof src.appComposerRingEnabled === 'boolean'
+            ? src.appComposerRingEnabled
+            : exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.appComposerRingEnabled,
+        appTopBarEnabled: typeof src.appTopBarEnabled === 'boolean'
+            ? src.appTopBarEnabled
+            : exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.appTopBarEnabled,
+        showNativeHudBar: typeof src.showNativeHudBar === 'boolean'
+            ? src.showNativeHudBar
+            : undefined,
+        orchestratorPricingMode: src.orchestratorPricingMode === 'strict' ? 'strict' : 'mapped',
+        displayCurrency: normalizeCurrency(src.displayCurrency, 'USD'),
+        customFxRate: normalizeNullablePositive(src.customFxRate, false),
+        subscriptionPlan,
+        subscriptionMonthlyFee,
+        subscriptionCurrency: normalizeCurrency(src.subscriptionCurrency, 'USD'),
+        calendarRetentionDays: clampNumber(src.calendarRetentionDays, exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.calendarRetentionDays, 30, 3650),
+        autoCheckUpdates: typeof src.autoCheckUpdates === 'boolean'
+            ? src.autoCheckUpdates
+            : exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS.autoCheckUpdates,
+        activityMaxRecentSteps: maxRecentSteps,
+        activityMaxArchives: maxArchives,
+    };
+}
+let hostSettingsProvider = null;
+/**
+ * Register a host-specific settings reader (e.g. VS Code `workspace.getConfiguration`)
+ * used when `buildSettingsContent` is invoked without explicit `options.settings`.
+ * Keeps `webview-settings-tab.ts` 100% pure Node/TypeScript with zero `vscode` imports.
+ */
+function registerSettingsProvider(provider) {
+    hostSettingsProvider = provider;
+}
+/**
+ * Lazy optional VS Code configuration reader — used only when `settings` is
+ * omitted by legacy IDE callers/tests. Never fails in pure Node / App Sidecar.
+ */
+function readOptionalVsCodeSettings() {
+    if (hostSettingsProvider) {
+        try {
+            return hostSettingsProvider() || {};
+        }
+        catch {
+            return {};
+        }
+    }
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const vscodeApi = require('vscode');
+        const cfg = vscodeApi?.workspace?.getConfiguration?.('antigravityContextMonitor');
+        if (!cfg) {
+            return {};
+        }
+        return {
+            pollingInterval: cfg.get('pollingInterval', 5),
+            quotaNotificationThreshold: cfg.get('quotaNotificationThreshold', 20),
+            showContext: cfg.get('statusBar.showContext', true),
+            showQuota: cfg.get('statusBar.showQuota', true),
+            showResetCountdown: cfg.get('statusBar.showResetCountdown', true),
+            showAiCredits: cfg.get('statusBar.showAiCredits', true),
+            showSpeed: cfg.get('statusBar.showSpeed', false),
+            showCacheHit: cfg.get('statusBar.showCacheHit', false),
+            showSessionCost: cfg.get('statusBar.showSessionCost', false),
+            tooltipDensity: (0, tooltip_budget_1.parseTooltipDensity)(cfg.get('statusBar.tooltipDensity', 'auto')),
+            showModelInternalId: cfg.get('showModelInternalId', false),
+            maxRecentSteps: cfg.get('activity.maxRecentSteps', 100),
+            maxArchives: cfg.get('activity.maxArchives', 20),
+            lockToMainAgent: cfg.get('lockToMainAgent', false),
+        };
+    }
+    catch {
+        return {};
+    }
+}
+function resolveCdpDiagnosticCode(cdpStatus, composerEnabled, topBarEnabled) {
+    if (cdpStatus?.diagnosticCode) {
+        return cdpStatus.diagnosticCode;
+    }
+    const anyEnabled = composerEnabled || topBarEnabled;
+    const state = cdpStatus?.state ?? (anyEnabled ? 'cdp_unavailable' : 'disabled');
+    if (state === 'connected') {
+        return 'connected';
+    }
+    if (state === 'error') {
+        return 'ws_error';
+    }
+    if (state === 'cdp_unavailable') {
+        return 'missing_port_file';
+    }
+    return 'disabled';
+}
+function buildCdpStatusPillHtml(cdpStatus, composerEnabled, topBarEnabled) {
+    const anyEnabled = composerEnabled || topBarEnabled;
+    const state = cdpStatus?.state ?? (anyEnabled ? 'cdp_unavailable' : 'disabled');
+    const diagCode = resolveCdpDiagnosticCode(cdpStatus, composerEnabled, topBarEnabled);
+    if (state === 'connected') {
+        const title = cdpStatus?.targetTitle
+            ? ` title="${(0, webview_helpers_1.esc)(cdpStatus.targetTitle)}"`
+            : '';
+        return `<span class="stg-status-pill is-connected" id="cdpStatusPill" data-cdp-state="connected" data-cdp-diagnostic="${(0, webview_helpers_1.esc)(diagCode)}"${title}>${(0, webview_helpers_1.tBiHtml)('Connected', '已连接')}</span>`;
+    }
+    if (state === 'error') {
+        const title = cdpStatus?.errorMessage ? ` title="${(0, webview_helpers_1.esc)(cdpStatus.errorMessage)}"` : '';
+        return `<span class="stg-status-pill is-error" id="cdpStatusPill" data-cdp-state="error" data-cdp-diagnostic="${(0, webview_helpers_1.esc)(diagCode)}"${title}>${(0, webview_helpers_1.tBiHtml)('CDP Error', 'CDP 异常')}</span>`;
+    }
+    if (state === 'cdp_unavailable') {
+        return `<span class="stg-status-pill is-inactive" id="cdpStatusPill" data-cdp-state="cdp_unavailable" data-cdp-diagnostic="${(0, webview_helpers_1.esc)(diagCode)}">${(0, webview_helpers_1.tBiHtml)('CDP Inactive', 'CDP 未就绪')}</span>`;
+    }
+    return `<span class="stg-status-pill is-disabled" id="cdpStatusPill" data-cdp-state="disabled" data-cdp-diagnostic="disabled">${(0, webview_helpers_1.tBiHtml)('Disabled', '未启用')}</span>`;
+}
+function getRevealLauncherLabel(platform) {
+    if (platform === 'win32') {
+        return { en: 'Show in Explorer', zh: '在资源管理器中显示' };
+    }
+    if (platform === 'linux') {
+        return { en: 'Open Folder', zh: '打开所在目录' };
+    }
+    return { en: 'Reveal in Finder', zh: '在访达中显示' };
+}
+function buildCdpDiagnosticHintHtml(cdpStatus, composerEnabled, topBarEnabled, activePlatform) {
+    const anyEnabled = composerEnabled || topBarEnabled;
+    const state = cdpStatus?.state ?? (anyEnabled ? 'cdp_unavailable' : 'disabled');
+    const diagCode = resolveCdpDiagnosticCode(cdpStatus, composerEnabled, topBarEnabled);
+    if (state === 'disabled' || diagCode === 'disabled') {
+        return `<div class="stg-diagnostic-hint" id="cdpDiagnosticHint" data-cdp-diagnostic="disabled" role="status" hidden></div>`;
+    }
+    const portSuffixEn = typeof cdpStatus?.discoveredPort === 'number' ? ` (port ${cdpStatus.discoveredPort})` : '';
+    const portSuffixZh = typeof cdpStatus?.discoveredPort === 'number' ? `（端口 ${cdpStatus.discoveredPort}）` : '';
+    const titleSuffix = cdpStatus?.targetTitle ? ` — ${cdpStatus.targetTitle}` : '';
+    const errSuffixEn = cdpStatus?.errorMessage ? `: ${cdpStatus.errorMessage}` : '';
+    const errSuffixZh = cdpStatus?.errorMessage ? `：${cdpStatus.errorMessage}` : '';
+    const launcherInstalled = Boolean(cdpStatus?.launcherStatus?.installed);
+    const resolvedPlatform = cdpStatus?.launcherStatus?.platform || activePlatform || cdpStatus?.platformGuide?.platform || 'darwin';
+    const buildInstalledLauncherHint = (prefixEn, prefixZh) => {
+        if (resolvedPlatform === 'win32') {
+            return (0, webview_helpers_1.tBiHtml)(`${prefixEn}Persistent launcher is ready, but this session was opened from the original Antigravity app (without --remote-debugging-port=0). Launch from the "Antigravity (CDP)" shortcut instead (click "Show in Explorer" below to locate it), then click Recheck CDP.`, `${prefixZh}持久化启动器已就绪，但本次打开的是原版 Antigravity（未启用 --remote-debugging-port=0）。请改从「Antigravity (CDP)」快捷方式启动（可点击下方「在资源管理器中显示」直接定位），启动后点击「重新检测」。`);
+        }
+        if (resolvedPlatform === 'linux') {
+            return (0, webview_helpers_1.tBiHtml)(`${prefixEn}Persistent launcher is ready, but this session was opened from the original Antigravity app (without --remote-debugging-port=0). Launch from the "Antigravity (CDP)" application entry instead (click "Open Folder" below to locate it), then click Recheck CDP.`, `${prefixZh}持久化启动器已就绪，但本次打开的是原版 Antigravity（未启用 --remote-debugging-port=0）。请改从应用菜单中的「Antigravity (CDP)」图标启动（可点击下方「打开所在目录」定位启动器目录），启动后点击「重新检测」。`);
+        }
+        return (0, webview_helpers_1.tBiHtml)(`${prefixEn}Persistent launcher is ready, but this session was opened from the original Antigravity app (without --remote-debugging-port=0). Launch from the "Antigravity (CDP)" icon instead (click "Reveal in Finder" below to locate it and drag it to your Dock), then click Recheck CDP.`, `${prefixZh}持久化启动器已就绪，但本次打开的是原版 Antigravity（未启用 --remote-debugging-port=0）。请改从「Antigravity (CDP)」图标启动（可点击下方「在访达中显示」直接定位并拖到程序坞），启动后点击「重新检测」。`);
+    };
+    let toneClass = 'is-warn';
+    let messageHtml = '';
+    switch (diagCode) {
+        case 'connected':
+            toneClass = 'is-good';
+            messageHtml = (0, webview_helpers_1.tBiHtml)(`Connected to Antigravity Hub${portSuffixEn}${titleSuffix}.`, `已连接到 Antigravity 主窗口${portSuffixZh}${titleSuffix}。`);
+            break;
+        case 'port_unreachable':
+            toneClass = 'is-warn';
+            messageHtml = (0, webview_helpers_1.tBiHtml)(`Found DevToolsActivePort${portSuffixEn}, but the CDP port is unreachable (stale file from an earlier run). Fully quit Antigravity App, relaunch with --remote-debugging-port=0, then click Recheck CDP.`, `检测到 DevToolsActivePort${portSuffixZh}，但调试端口无响应（可能是旧会话残留文件）。请完全退出 Antigravity App 并以 --remote-debugging-port=0 重启，再点击「重新检测」。`);
+            break;
+        case 'no_hub_target':
+            toneClass = 'is-warn';
+            messageHtml = (0, webview_helpers_1.tBiHtml)(`CDP port${portSuffixEn} is listening, but no Antigravity Hub window target was found (only sidecar or DevTools targets detected). Open an Antigravity workspace window and click Recheck CDP.`, `CDP 端口${portSuffixZh}已响应，但未找到 Antigravity 主窗口目标（仅检测到侧栏或 DevTools 页面）。请打开 Antigravity 主窗口后点击「重新检测」。`);
+            break;
+        case 'ws_error':
+            toneClass = 'is-error';
+            messageHtml = (0, webview_helpers_1.tBiHtml)(`CDP WebSocket connection failed${errSuffixEn}. Click Recheck CDP or relaunch Antigravity App with --remote-debugging-port=0.`, `CDP WebSocket 连接失败${errSuffixZh}。请点击「重新检测」或以 --remote-debugging-port=0 重启 Antigravity App。`);
+            break;
+        case 'eval_error':
+            toneClass = 'is-error';
+            messageHtml = (0, webview_helpers_1.tBiHtml)(`Connected to Antigravity Hub, but overlay injection failed${errSuffixEn}. Click Recheck CDP once the window finishes loading.`, `已连接 Antigravity 主窗口，但悬浮组件注入失败${errSuffixZh}。请待窗口加载完成后点击「重新检测」。`);
+            break;
+        case 'host_missing_flag':
+            toneClass = 'is-warn';
+            messageHtml = launcherInstalled
+                ? buildInstalledLauncherHint('', '')
+                : (0, webview_helpers_1.tBiHtml)('Antigravity App is running without --remote-debugging-port=0 (e.g. opened from the original icon, auto-updated, or relaunched during the ~5s shutdown after Cmd+Q). Step 1: click "Create Persistent Launcher" below to create a separate launcher. Step 2: launch from the new "Antigravity (CDP)" icon instead (the original Antigravity icon is never modified), then click Recheck CDP.', '当前运行的 Antigravity App 未启用 --remote-debugging-port=0（例如从原版图标启动、自动更新重启，或按 Cmd+Q 后约 5 秒后台清理尚未完成）。步骤 1：点击下方「一键生成持久化启动器」创建独立启动器；步骤 2：之后改从新建的「Antigravity (CDP)」图标启动（原版 Antigravity 图标不会被修改），启动后点击「重新检测」。');
+            break;
+        case 'missing_port_file':
+        default:
+            toneClass = 'is-warn';
+            messageHtml = launcherInstalled
+                ? buildInstalledLauncherHint('DevToolsActivePort not found — ', '未检测到 DevToolsActivePort —— ')
+                : (0, webview_helpers_1.tBiHtml)('DevToolsActivePort not found — Antigravity App is running without --remote-debugging-port=0 (or was relaunched during the ~5s shutdown after Cmd+Q). Step 1: click "Create Persistent Launcher" below to create a separate launcher. Step 2: launch from the new "Antigravity (CDP)" icon instead (the original Antigravity icon is never modified), then click Recheck CDP.', '未检测到 DevToolsActivePort —— 当前运行的 Antigravity App 未启用 --remote-debugging-port=0（或按 Cmd+Q 后约 5 秒后台清理尚未完成）。步骤 1：点击下方「一键生成持久化启动器」创建独立启动器；步骤 2：之后改从新建的「Antigravity (CDP)」图标启动（原版 Antigravity 图标不会被修改），启动后点击「重新检测」。');
+            break;
+    }
+    return `<div class="stg-diagnostic-hint ${toneClass}" id="cdpDiagnosticHint" data-cdp-diagnostic="${(0, webview_helpers_1.esc)(diagCode)}" role="status">${messageHtml}</div>`;
+}
+function getDefaultLauncherDisplayPath(platform) {
+    if (platform === 'win32') {
+        return '%USERPROFILE%\\Desktop\\Antigravity (CDP).lnk';
+    }
+    if (platform === 'linux') {
+        return '~/.local/share/applications/antigravity-cdp.desktop';
+    }
+    return '~/Applications/Antigravity (CDP).app';
+}
+function buildCdpLauncherRowHtml(launcherStatus, activePlatform) {
+    const installed = Boolean(launcherStatus?.installed);
+    const resolvedPlatform = launcherStatus?.platform || activePlatform || 'darwin';
+    const displayPath = launcherStatus?.launcherPath?.trim()
+        || getDefaultLauncherDisplayPath(resolvedPlatform);
+    const statusBadgeHtml = installed
+        ? `<span class="stg-cdp-launcher-badge is-installed">${(0, webview_helpers_1.tBiHtml)('Installed', '已创建')}</span>`
+        : `<span class="stg-cdp-launcher-badge">${(0, webview_helpers_1.tBiHtml)('Not created', '未创建')}</span>`;
+    const setupLabelHtml = installed
+        ? (0, webview_helpers_1.tBiHtml)('Recreate Launcher', '重新生成启动器')
+        : (0, webview_helpers_1.tBiHtml)('Create Persistent Launcher', '一键生成持久化启动器');
+    const revealLabel = getRevealLauncherLabel(resolvedPlatform);
+    const revealLabelHtml = (0, webview_helpers_1.tBiHtml)(revealLabel.en, revealLabel.zh);
+    const noteHtml = launcherStatus?.noteEn && launcherStatus?.noteZh
+        ? (0, webview_helpers_1.tBiHtml)(launcherStatus.noteEn, launcherStatus.noteZh)
+        : (0, webview_helpers_1.tBiHtml)('Zero-patch launcher outside Antigravity.app — survives auto-updates and waits cleanly through macOS\'s ~5s background shutdown after Cmd+Q.', '独立于 Antigravity.app 的零魔改启动器——跨自动更新持久生效，并自动等待 macOS 按 Cmd+Q 后约 5 秒的后台退出清理完成。');
+    return `
+            <div class="stg-cdp-launcher-box" id="cdpLauncherBox">
+                <div class="stg-cdp-launcher-head">
+                    <span class="stg-cdp-launcher-title">${(0, webview_helpers_1.tBiHtml)('Persistent CDP Launcher (Zero-Patch)', '持久化 CDP 启动器（零魔改）')}</span>
+                    <span class="stg-cdp-launcher-status" id="cdpLauncherStatus" data-launcher-installed="${installed ? 'true' : 'false'}" data-launcher-platform="${(0, webview_helpers_1.esc)(resolvedPlatform)}" data-launcher-path="${(0, webview_helpers_1.esc)(displayPath)}">${statusBadgeHtml}<code class="stg-cdp-launcher-path">${(0, webview_helpers_1.esc)(displayPath)}</code></span>
+                </div>
+                <p class="stg-cdp-launcher-note" id="cdpLauncherNote">${noteHtml}</p>
+                <div class="storage-actions stg-cdp-launcher-actions">
+                    <button type="button" class="action-btn${installed ? '' : ' stg-btn-primary'}" id="cdpSetupLauncherBtn" data-action="setupCdpLauncher"><span>${setupLabelHtml}</span></button>
+                    <button type="button" class="action-btn${installed ? ' stg-btn-primary' : ''}" id="cdpRevealLauncherBtn" data-action="revealCdpLauncher" data-launcher-platform="${(0, webview_helpers_1.esc)(resolvedPlatform)}"${installed ? '' : ' hidden'}>${webview_icons_1.ICON.folder} <span>${revealLabelHtml}</span></button>
+                    <button type="button" class="action-btn" id="cdpRemoveLauncherBtn" data-action="removeCdpLauncher"${installed ? '' : ' hidden'}><span>${(0, webview_helpers_1.tBiHtml)('Remove Launcher', '移除启动器')}</span></button>
+                    <span id="cdpLauncherFeedback" class="threshold-feedback" role="status"></span>
+                </div>
+            </div>`;
+}
+function buildUpdateStatusPillHtml(currentVersion, updateStatus) {
+    const curTag = currentVersion.startsWith('v') ? currentVersion : `v${currentVersion}`;
+    const rawLatest = updateStatus?.latestVersion?.trim() || null;
+    const latestTag = rawLatest ? (rawLatest.startsWith('v') ? rawLatest : `v${rawLatest}`) : null;
+    const updateAvailable = Boolean(updateStatus?.updateAvailable
+        || updateStatus?.hasUpdate
+        || updateStatus?.status === 'update_available');
+    if (updateAvailable && latestTag) {
+        return {
+            updateAvailable: true,
+            latestTag,
+            pillHtml: `<span class="stg-status-pill is-update" id="updateStatusPill" data-update-status="update_available">${(0, webview_helpers_1.tBiHtml)(`Update available: ${latestTag}`, `有可用更新：${latestTag}`)}</span>`,
+        };
+    }
+    if (updateStatus?.status === 'error') {
+        const title = updateStatus.error ? ` title="${(0, webview_helpers_1.esc)(updateStatus.error)}"` : '';
+        return {
+            updateAvailable: false,
+            latestTag,
+            pillHtml: `<span class="stg-status-pill is-error" id="updateStatusPill" data-update-status="error"${title}>${(0, webview_helpers_1.tBiHtml)('Check failed', '检查失败')}</span>`,
+        };
+    }
+    if (updateStatus?.status === 'up_to_date' || updateStatus?.status === 'not_modified' || (updateStatus?.checkedAt && !updateAvailable)) {
+        return {
+            updateAvailable: false,
+            latestTag,
+            pillHtml: `<span class="stg-status-pill is-uptodate" id="updateStatusPill" data-update-status="up_to_date">${(0, webview_helpers_1.tBiHtml)(`Up to date (${curTag})`, `已是最新（${curTag}）`)}</span>`,
+        };
+    }
+    return {
+        updateAvailable: false,
+        latestTag,
+        pillHtml: `<span class="stg-status-pill" id="updateStatusPill" data-update-status="idle">${(0, webview_helpers_1.tBiHtml)(`Current ${curTag}`, `当前版本 ${curTag}`)}</span>`,
+    };
+}
+// ─── Public API ──────────────────────────────────────────────────────────────
+/** Build the Settings tab HTML from plain settings (or lazy VS Code config fallback). */
+function buildSettingsContent(_configs, storage, panelPrefs, options) {
+    const surface = options?.surface ?? 'ide';
+    const isAppSidecar = surface === 'app-sidecar' || surface === 'app';
+    const baseSettings = options?.settings ? options.settings : readOptionalVsCodeSettings();
+    const mergedRaw = {
+        ...baseSettings,
+        ...(options?.appSettings ?? {}),
+    };
+    const resolved = normalizeMonitorDocumentSettings(mergedRaw);
+    const { pollingInterval, showContext, showQuota, showResetCountdown, showAiCredits, showSpeed, showCacheHit, showSessionCost, tooltipDensity, showModelInternalId, quotaNotificationThreshold: quotaNotifyThreshold, } = resolved;
+    const lockToMainAgent = !!resolved.lockToMainAgent;
+    const appComposerRingEnabled = !!resolved.appComposerRingEnabled;
+    const appTopBarEnabled = !!resolved.appTopBarEnabled;
+    const showNativeHudBar = resolved.showNativeHudBar ?? isAppSidecar;
+    const orchestratorPricingMode = resolved.orchestratorPricingMode === 'strict' ? 'strict' : 'mapped';
+    const displayCurrency = resolved.displayCurrency ?? 'USD';
+    const customFxRate = resolved.customFxRate ?? null;
+    const subscriptionPlan = resolved.subscriptionPlan ?? 'none';
+    const subscriptionMonthlyFee = resolved.subscriptionMonthlyFee ?? null;
+    const subscriptionCurrency = resolved.subscriptionCurrency ?? 'USD';
+    const calendarRetentionDays = resolved.calendarRetentionDays ?? 400;
+    const autoCheckUpdates = resolved.autoCheckUpdates ?? true;
+    const activityMaxRecentSteps = resolved.activityMaxRecentSteps ?? resolved.maxRecentSteps ?? 100;
+    const activityMaxArchives = resolved.activityMaxArchives ?? resolved.maxArchives ?? 20;
+    const resolvedZoom = clampNumber(options?.zoomLevel, 100, 60, 150);
+    const currentVersion = (options?.version && options.version.trim()) || options?.updateStatus?.currentVersion || '1.17.9';
+    const activePlatform = options?.cdpStatus?.launcherStatus?.platform
+        || options?.cdpStatus?.platformGuide?.platform
+        || (typeof process !== 'undefined' ? process.platform : 'darwin');
+    const tabScrollHintEnabled = panelPrefs?.showTabScrollHint ?? true;
+    const showScrollbar = panelPrefs?.showScrollbar ?? false;
+    const showEndOfContent = panelPrefs?.showEndOfContent ?? true;
+    const stateFileSizeLabel = storage ? (0, webview_helpers_1.formatFileSize)(storage.stateFileSizeBytes) : '0 B';
+    const ideOnlyDisabledAttr = isAppSidecar ? ' disabled aria-disabled="true"' : '';
+    const storageCard = storage ? `
+        <section class="stg-card" data-accent="storage">
+            <div class="stg-header">
+                <span class="stg-header-icon">${webview_icons_1.ICON.database}</span>
+                <h2>${(0, webview_helpers_1.tBiHtml)('Persistent Storage', '持久化存储')}</h2>
+            </div>
+            <p class="raw-desc">${(0, webview_helpers_1.tBiHtml)('This file is shared between Antigravity IDE and Antigravity App outside the editor state database, so history survives uninstall and reinstall unless deleted manually.', '该文件在 Antigravity IDE 与 Antigravity App 之间共享，存储在扩展状态数据库之外，因此只要你不手动删除，历史数据会跨卸载或重装保留。')}</p>
+            <div class="storage-path-box">
+                <code class="storage-path-text">${(0, webview_helpers_1.esc)(storage.stateFilePath)}</code>
+                <span class="storage-path-state ${storage.stateFileExists ? 'is-ready' : 'is-missing'}">
+                    <span>${storage.stateFileExists ? (0, webview_helpers_1.tBiHtml)('Ready', '已存在') : (0, webview_helpers_1.tBiHtml)('Missing', '不存在')}</span>
+                </span>
+            </div>
+            <div class="storage-actions">
+                <button type="button" class="action-btn" id="copyStatePath">${webview_icons_1.ICON.copy} <span>${(0, webview_helpers_1.tBiHtml)('Copy Path', '复制路径')}</span></button>
+                ${isAppSidecar ? '' : `<button type="button" class="action-btn" id="openStateFile">${webview_icons_1.ICON.file} <span>${(0, webview_helpers_1.tBiHtml)('Open File', '打开文件')}</span></button>`}
+                <button type="button" class="action-btn" id="revealStateFile">${webview_icons_1.ICON.folder} <span>${(0, webview_helpers_1.tBiHtml)('Reveal', '定位文件')}</span></button>
+                <span id="statePathFeedback" class="threshold-feedback" role="status"></span>
+            </div>
+            <div class="storage-stat-grid">
+                <div class="storage-stat"><span class="storage-stat-val">${stateFileSizeLabel}</span><span class="storage-stat-label">${(0, webview_helpers_1.tBiHtml)('File Size', '文件大小')}</span></div>
+                <div class="storage-stat"><span class="storage-stat-val">${storage.calendarDayCount}</span><span class="storage-stat-label">${(0, webview_helpers_1.tBiHtml)('Calendar Days', '日历天数')}</span></div>
+            </div>
+        </section>` : '';
+    // ── App Ambient Overlays (Opt-In CDP) & Native Panel Compact HUD Card ──
+    const cdpPillHtml = buildCdpStatusPillHtml(options?.cdpStatus, appComposerRingEnabled, appTopBarEnabled);
+    const cdpDiagnosticHintHtml = buildCdpDiagnosticHintHtml(options?.cdpStatus, appComposerRingEnabled, appTopBarEnabled, activePlatform);
+    const cdpLauncherRowHtml = buildCdpLauncherRowHtml(options?.cdpStatus?.launcherStatus, activePlatform);
+    const macWaitLaunchCmd = `while pgrep -f '^/Applications/Antigravity\\.app/Contents/MacOS/Antigravity($| )' >/dev/null; do sleep 0.5; done; open -a "/Applications/Antigravity.app" --args --remote-debugging-port=0`;
+    const winPsCmd = '& "$env:LOCALAPPDATA\\Programs\\Antigravity\\Antigravity.exe" --remote-debugging-port=0';
+    const winCmdShortcut = '"%LOCALAPPDATA%\\Programs\\Antigravity\\Antigravity.exe" --remote-debugging-port=0';
+    const linuxLaunchCmd = 'antigravity --remote-debugging-port=0';
+    const appOverlaysCard = `
+        <section class="stg-card" id="appOverlaysCard" data-accent="display">
+            <div class="stg-header">
+                <span class="stg-header-icon">${webview_icons_1.ICON.bolt}</span>
+                <h2>${(0, webview_helpers_1.tBiHtml)('App Ambient Overlays (Opt-In CDP)', 'App 桌面悬浮组件（可选 CDP）')}</h2>
+                ${cdpPillHtml}
+            </div>
+            <p class="raw-desc">${(0, webview_helpers_1.tBiHtml)('Native Panel Compact HUD renders immediately at the top of this monitor panel with zero CDP. The two desktop floating overlays below attach read-only Shadow DOM widgets inside Antigravity App when launched with --remote-debugging-port=0 — zero app.asar patching and 100% ToS-safe.', '「面板顶部紧凑 HUD」会直接渲染在本监控面板顶部，无需 CDP 即开即用；下方两项桌面悬浮组件需先以 --remote-debugging-port=0 启动 Antigravity App 才会在主窗口内以只读 Shadow DOM 渲染，零 app.asar 修改且 100% 合规。')}</p>
+            <div class="toggle-group">
+                <label class="toggle-row">
+                    <input type="checkbox" id="toggleNativeHudBar" class="toggle-cb" data-app-setting="showNativeHudBar" data-feedback-id="appOverlaysFeedback" ${showNativeHudBar ? 'checked' : ''} />
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                    <span>${(0, webview_helpers_1.tBiHtml)('Native Panel Compact HUD (in-panel top bar, no CDP)', '面板顶部紧凑 HUD（本面板顶部常驻，无需 CDP）')}</span>
+                </label>
+                <label class="toggle-row">
+                    <input type="checkbox" id="toggleAppComposerRing" class="toggle-cb" data-app-setting="appComposerRingEnabled" data-feedback-id="appOverlaysFeedback" ${appComposerRingEnabled ? 'checked' : ''} />
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                    <span>${(0, webview_helpers_1.tBiHtml)('Composer Context Ring — Left of Turbo (CDP)', '对话框悬浮环（Turbo 左侧，需 CDP）')}</span>
+                </label>
+                <label class="toggle-row">
+                    <input type="checkbox" id="toggleAppTopBar" class="toggle-cb" data-app-setting="appTopBarEnabled" data-feedback-id="appOverlaysFeedback" ${appTopBarEnabled ? 'checked' : ''} />
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                    <span>${(0, webview_helpers_1.tBiHtml)('Top-Right Status Bar & Quota Board (CDP)', '右上角常驻状态栏与额度看板（需 CDP）')}</span>
+                </label>
+            </div>
+            ${cdpDiagnosticHintHtml}
+            <div class="storage-actions stg-cdp-actions">
+                <button type="button" class="action-btn" id="cdpRecheckBtn" data-action="recheckCdp">${webview_icons_1.ICON.refresh} <span>${(0, webview_helpers_1.tBiHtml)('Recheck CDP', '重新检测')}</span></button>
+                <span id="appOverlaysFeedback" class="threshold-feedback" role="status"></span>
+            </div>
+            ${cdpLauncherRowHtml}
+            <details id="settings-cdp-guide" class="stg-guide-details" data-state-key="settings-cdp-guide">
+                <summary>${(0, webview_helpers_1.tBiHtml)('Manual terminal CDP launch guide (macOS / Windows / Linux)', '手动终端 CDP 启动指引（macOS / Windows / Linux）')}</summary>
+                <div class="stg-guide-body">
+                    <p>${(0, webview_helpers_1.tBiHtml)('Zero app.asar patching · 100% ToS-safe read-only observation.', '零 app.asar 篡改 · 100% 合规只读观测。')}</p>
+                    <p class="stg-guide-step">${(0, webview_helpers_1.tBiHtml)('Step 1 — Quit Antigravity App completely first (macOS: Cmd+Q and wait ~5s for background language_server teardown; Windows/Linux: close all windows & tray icon). If Antigravity is still exiting, macOS "open -a" silently drops --args.', '第一步 — 先完全退出 Antigravity App（macOS 按 Cmd+Q 后需等待约 5 秒后台 language_server 清理完成；Windows/Linux 关闭所有窗口及托盘图标）。若旧进程仍在退出中，macOS 的 open -a 会静默丢弃 --args 参数。')}</p>
+                    <p class="stg-guide-step">${(0, webview_helpers_1.tBiHtml)('Step 2 — Relaunch Antigravity App with --remote-debugging-port=0 (the macOS command below automatically waits out the 5s teardown), then click Recheck CDP:', '第二步 — 使用 --remote-debugging-port=0 重新启动 Antigravity App（下方 macOS 命令会自动等待 5 秒后台清理结束），然后点击「重新检测」：')}</p>
+                    <div class="stg-code-list">
+                        <div class="stg-code-item${activePlatform === 'darwin' ? ' is-current-platform' : ''}">
+                            <div class="stg-code-item-head">
+                                <strong>macOS (Terminal — race-free wait &amp; launch)</strong>
+                                <button type="button" class="action-btn cdp-copy-btn" data-copy-command="${(0, webview_helpers_1.esc)(macWaitLaunchCmd)}" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Copy macOS command', '复制 macOS 命令'))}">${webview_icons_1.ICON.copy} <span>${(0, webview_helpers_1.tBiHtml)('Copy', '复制')}</span></button>
+                            </div>
+                            <code>${(0, webview_helpers_1.esc)(macWaitLaunchCmd)}</code>
+                        </div>
+                        <div class="stg-code-item${activePlatform === 'win32' ? ' is-current-platform' : ''}">
+                            <div class="stg-code-item-head">
+                                <strong>Windows (PowerShell)</strong>
+                                <button type="button" class="action-btn cdp-copy-btn" data-copy-command="${(0, webview_helpers_1.esc)(winPsCmd)}" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Copy Windows PowerShell command', '复制 Windows PowerShell 命令'))}">${webview_icons_1.ICON.copy} <span>${(0, webview_helpers_1.tBiHtml)('Copy', '复制')}</span></button>
+                            </div>
+                            <code>${(0, webview_helpers_1.esc)(winPsCmd)}</code>
+                        </div>
+                        <div class="stg-code-item${activePlatform === 'win32' ? ' is-current-platform' : ''}">
+                            <div class="stg-code-item-head">
+                                <strong>Windows (CMD / Shortcut)</strong>
+                                <button type="button" class="action-btn cdp-copy-btn" data-copy-command="${(0, webview_helpers_1.esc)(winCmdShortcut)}" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Copy Windows CMD command', '复制 Windows CMD 命令'))}">${webview_icons_1.ICON.copy} <span>${(0, webview_helpers_1.tBiHtml)('Copy', '复制')}</span></button>
+                            </div>
+                            <code>${(0, webview_helpers_1.esc)(winCmdShortcut)}</code>
+                        </div>
+                        <div class="stg-code-item${activePlatform === 'linux' ? ' is-current-platform' : ''}">
+                            <div class="stg-code-item-head">
+                                <strong>Linux</strong>
+                                <button type="button" class="action-btn cdp-copy-btn" data-copy-command="${(0, webview_helpers_1.esc)(linuxLaunchCmd)}" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Copy Linux command', '复制 Linux 命令'))}">${webview_icons_1.ICON.copy} <span>${(0, webview_helpers_1.tBiHtml)('Copy', '复制')}</span></button>
+                            </div>
+                            <code>${(0, webview_helpers_1.esc)(linuxLaunchCmd)}</code>
+                        </div>
+                    </div>
+                    <p class="stg-guide-note">${(0, webview_helpers_1.tBiHtml)('Tip: Antigravity auto-updates restart the app without CLI flags. Use the 1-click Persistent CDP Launcher above (or run `node scripts/install-app-plugin.mjs --setup-cdp-launcher`) so you never have to retype terminal commands.', '提示：Antigravity 自动更新重启后会丢弃启动参数。建议使用上方「一键生成持久化启动器」（或运行 `node scripts/install-app-plugin.mjs --setup-cdp-launcher`），以后直接从启动器打开即可永久生效。')}</p>
+                </div>
+            </details>
+        </section>`;
+    // ── Updates & Release Checks Card ──
+    const updateInfo = buildUpdateStatusPillHtml(currentVersion, options?.updateStatus);
+    const updatesCard = `
+        <section class="stg-card" id="updatesSettingsCard" data-accent="storage">
+            <div class="stg-header">
+                <span class="stg-header-icon">${webview_icons_1.ICON.refresh}</span>
+                <h2>${(0, webview_helpers_1.tBiHtml)('Updates & Release Checks', '版本更新与检查')}</h2>
+                ${updateInfo.pillHtml}
+            </div>
+            <div class="toggle-group">
+                <label class="toggle-row">
+                    <input type="checkbox" id="toggleAutoCheckUpdates" class="toggle-cb" data-app-setting="autoCheckUpdates" data-feedback-id="updatesFeedback" ${autoCheckUpdates ? 'checked' : ''} />
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                    <span>${(0, webview_helpers_1.tBiHtml)('Automatically check GitHub Releases for new versions', '自动检查 GitHub Releases 新版本')}</span>
+                </label>
+            </div>
+            <div class="storage-actions">
+                <button type="button" class="action-btn" id="settingsCheckUpdatesBtn" data-action="checkForUpdates">${webview_icons_1.ICON.refresh} <span>${(0, webview_helpers_1.tBiHtml)('Check for Updates', '检查更新')}</span></button>
+                ${isAppSidecar && updateInfo.updateAvailable
+        ? `<button type="button" class="action-btn stg-btn-primary" id="settingsUpgradeNowBtn" data-action="applyPluginUpdate"><span>${(0, webview_helpers_1.tBiHtml)('Upgrade Now', '立即升级')}</span></button>`
+        : ''}
+                <span id="updatesFeedback" class="threshold-feedback" role="status"></span>
+            </div>
+            ${isAppSidecar
+        ? ''
+        : `<p class="stg-hint-note">${(0, webview_helpers_1.tBiHtml)('Antigravity IDE extensions update automatically via Open VSX, or you can install the latest VSIX from GitHub Releases.', 'Antigravity IDE 扩展会通过 Open VSX 自动更新，也可从 GitHub Releases 手动安装最新 VSIX。')}</p>`}
+        </section>`;
+    // ── Cost, Currency & History Card ──
+    const currencyOptionsHtml = cli_usage_scanner_1.CURRENCY_CODES.map((code) => {
+        const preset = cli_usage_scanner_1.CURRENCY_PRESETS[code];
+        const label = `${code} — ${(0, i18n_core_1.tBi)(preset.nameEn, preset.nameZh)}`;
+        return `<option value="${code}"${displayCurrency === code ? ' selected' : ''}>${(0, webview_helpers_1.esc)(label)}</option>`;
+    }).join('');
+    const subCurrencyOptionsHtml = cli_usage_scanner_1.CURRENCY_CODES.map((code) => {
+        const preset = cli_usage_scanner_1.CURRENCY_PRESETS[code];
+        const label = `${code} — ${(0, i18n_core_1.tBi)(preset.nameEn, preset.nameZh)}`;
+        return `<option value="${code}"${subscriptionCurrency === code ? ' selected' : ''}>${(0, webview_helpers_1.esc)(label)}</option>`;
+    }).join('');
+    const planOptionsHtml = cli_usage_scanner_1.SUBSCRIPTION_PLAN_PRESET_ORDER.map((planId) => {
+        const preset = cli_usage_scanner_1.SUBSCRIPTION_PLAN_PRESETS[planId];
+        const feeHint = preset.monthlyUsd > 0 ? ` ($${preset.monthlyUsd}/mo)` : '';
+        const label = `${(0, i18n_core_1.tBi)(preset.labelEn, preset.labelZh)}${feeHint}`;
+        return `<option value="${planId}"${subscriptionPlan === planId ? ' selected' : ''}>${(0, webview_helpers_1.esc)(label)}</option>`;
+    }).join('');
+    const subscriptionFeePlaceholder = String(cli_usage_scanner_1.SUBSCRIPTION_PLAN_PRESETS[subscriptionPlan]?.monthlyUsd > 0
+        ? cli_usage_scanner_1.SUBSCRIPTION_PLAN_PRESETS[subscriptionPlan].monthlyUsd
+        : cli_usage_scanner_1.SUBSCRIPTION_PLAN_PRESETS['google-ai-pro'].monthlyUsd);
+    const defaultFxPlaceholder = String(cli_usage_scanner_1.CURRENCY_PRESETS[displayCurrency]?.defaultRatePerUsd ?? 1);
+    const costCurrencyHistoryCard = `
+        <section class="stg-card" id="costCurrencyHistoryCard" data-accent="history">
+            <div class="stg-header">
+                <span class="stg-header-icon">${webview_icons_1.ICON.chart}</span>
+                <h2>${(0, webview_helpers_1.tBiHtml)('Cost, Currency & History', '费用、货币与历史')}</h2>
+            </div>
+            <div class="setting-row">
+                <label>${(0, webview_helpers_1.tBiHtml)('Orchestrator pricing mode', '编排模型计费模式')}</label>
+                <p class="raw-desc">${(0, webview_helpers_1.tBiHtml)('Mapped Base estimates legacy fixed Orchestrator IDs (M537/M667/M681/M669) using their base model official rate; Strict mode marks them Unpriced until custom rates are entered.', '按底座估算会使用对应底座模型的官方单价估算旧版固定编排模型（M537/M667/M681/M669）；严格模式在填写自定义价格前将其标记为未定价。')}</p>
+                <div class="stg-seg-group" role="radiogroup" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Orchestrator pricing mode', '编排模型计费模式'))}">
+                    <button type="button" class="stg-seg-btn${orchestratorPricingMode === 'mapped' ? ' is-active' : ''}" id="stgOrchModeMapped" data-action="setOrchestratorPricingMode" data-mode="mapped" role="radio" aria-checked="${orchestratorPricingMode === 'mapped' ? 'true' : 'false'}">${(0, webview_helpers_1.tBiHtml)('Mapped Base', '按底座估算')}</button>
+                    <button type="button" class="stg-seg-btn${orchestratorPricingMode === 'strict' ? ' is-active' : ''}" id="stgOrchModeStrict" data-action="setOrchestratorPricingMode" data-mode="strict" role="radio" aria-checked="${orchestratorPricingMode === 'strict' ? 'true' : 'false'}">${(0, webview_helpers_1.tBiHtml)('Strict', '严格模式')}</button>
+                </div>
+                <span id="orchPricingModeFeedback" class="threshold-feedback" role="status"></span>
+            </div>
+
+            <div class="stg-divider"></div>
+
+            <div class="stg-form-grid">
+                <div class="stg-field">
+                    <label for="displayCurrencySelect">${(0, webview_helpers_1.tBiHtml)('Display currency', '显示货币')}</label>
+                    <select id="displayCurrencySelect" class="stg-select" data-app-setting="displayCurrency" data-feedback-id="customFxRateFeedback">
+                        ${currencyOptionsHtml}
+                    </select>
+                </div>
+                <div class="stg-field">
+                    <label for="customFxRateInput">${(0, webview_helpers_1.tBiHtml)('Custom FX rate (per 1 USD)', '自定义汇率（每 1 USD）')}</label>
+                    <input type="number" id="customFxRateInput" class="threshold-input"
+                           data-app-setting="customFxRate" data-setting-type="nullable-float" data-feedback-id="customFxRateFeedback"
+                           min="0.0001" max="1000000" step="0.01"
+                           value="${customFxRate !== null ? (0, webview_helpers_1.esc)(String(customFxRate)) : ''}"
+                           placeholder="${(0, webview_helpers_1.esc)(defaultFxPlaceholder)}" />
+                    <span id="customFxRateFeedback" class="threshold-feedback" role="status"></span>
+                </div>
+            </div>
+
+            <div class="stg-form-grid stg-form-grid-subscription">
+                <div class="stg-field stg-field-plan">
+                    <label for="subscriptionPlanSelect">${(0, webview_helpers_1.tBiHtml)('Subscription plan (ROI)', '订阅方案（ROI 参考）')}</label>
+                    <select id="subscriptionPlanSelect" class="stg-select" data-app-setting="subscriptionPlan" data-feedback-id="subscriptionFeedback">
+                        ${planOptionsHtml}
+                    </select>
+                </div>
+                <div class="stg-field">
+                    <label for="subscriptionFeeInput">${(0, webview_helpers_1.tBiHtml)('Monthly fee', '月费金额')}</label>
+                    <input type="number" id="subscriptionFeeInput" class="threshold-input"
+                           data-app-setting="subscriptionMonthlyFee" data-setting-type="nullable-float" data-feedback-id="subscriptionFeedback"
+                           min="0" max="100000" step="0.01"
+                           value="${subscriptionMonthlyFee !== null ? (0, webview_helpers_1.esc)(String(subscriptionMonthlyFee)) : ''}"
+                           placeholder="${(0, webview_helpers_1.esc)(subscriptionFeePlaceholder)}" />
+                </div>
+                <div class="stg-field">
+                    <label for="subscriptionCurrencySelect">${(0, webview_helpers_1.tBiHtml)('Fee currency', '月费币种')}</label>
+                    <select id="subscriptionCurrencySelect" class="stg-select" data-app-setting="subscriptionCurrency" data-feedback-id="subscriptionFeedback">
+                        ${subCurrencyOptionsHtml}
+                    </select>
+                    <span id="subscriptionFeedback" class="threshold-feedback" role="status"></span>
+                </div>
+            </div>
+            <p class="stg-hint-note">${(0, webview_helpers_1.tBiHtml)(cli_usage_scanner_1.ROI_DISCLAIMER_EN, cli_usage_scanner_1.ROI_DISCLAIMER_ZH)}</p>
+
+            <div class="stg-divider"></div>
+
+            <div class="setting-row">
+                <label for="calendarRetentionInput">${(0, webview_helpers_1.tBiHtml)('Calendar retention (days)', '日历历史保留天数')}</label>
+                <div class="threshold-input-row">
+                    <div class="num-spinner">
+                        <button type="button" class="num-spinner-btn decrement" data-target="calendarRetentionInput" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Decrease calendar retention days', '减少日历保留天数'))}">−</button>
+                        <input type="number" id="calendarRetentionInput" class="threshold-input"
+                               data-app-setting="calendarRetentionDays" data-setting-type="int" data-feedback-id="calendarRetentionFeedback"
+                               value="${calendarRetentionDays}" min="30" max="3650" step="30" />
+                        <button type="button" class="num-spinner-btn increment" data-target="calendarRetentionInput" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Increase calendar retention days', '增加日历保留天数'))}">+</button>
+                    </div>
+                    <button type="button" class="action-btn" id="calendarRetentionSaveBtn"><span>${(0, webview_helpers_1.tBiHtml)('Save', '保存')}</span></button>
+                    <span id="calendarRetentionFeedback" class="threshold-feedback" role="status"></span>
+                </div>
+            </div>
+
+            <div class="stg-form-grid">
+                <div class="stg-field">
+                    <label for="activityMaxRecentStepsInput">${(0, webview_helpers_1.tBiHtml)('Max recent activity steps', '最近活动步骤上限')}</label>
+                    <div class="threshold-input-row">
+                        <div class="num-spinner">
+                            <button type="button" class="num-spinner-btn decrement" data-target="activityMaxRecentStepsInput" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Decrease max recent activity steps', '减小最近活动步骤上限'))}">−</button>
+                            <input type="number" id="activityMaxRecentStepsInput" class="threshold-input"
+                                   data-app-setting="activityMaxRecentSteps" data-setting-type="int" data-feedback-id="activityMaxRecentStepsFeedback"
+                                   value="${activityMaxRecentSteps}" min="10" max="500" step="10" />
+                            <button type="button" class="num-spinner-btn increment" data-target="activityMaxRecentStepsInput" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Increase max recent activity steps', '增大最近活动步骤上限'))}">+</button>
+                        </div>
+                        <span id="activityMaxRecentStepsFeedback" class="threshold-feedback" role="status"></span>
+                    </div>
+                </div>
+                <div class="stg-field">
+                    <label for="activityMaxArchivesInput">${(0, webview_helpers_1.tBiHtml)('Max archived activity sessions', '活动归档会话上限')}</label>
+                    <div class="threshold-input-row">
+                        <div class="num-spinner">
+                            <button type="button" class="num-spinner-btn decrement" data-target="activityMaxArchivesInput" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Decrease max archived activity sessions', '减小活动归档会话上限'))}">−</button>
+                            <input type="number" id="activityMaxArchivesInput" class="threshold-input"
+                                   data-app-setting="activityMaxArchives" data-setting-type="int" data-feedback-id="activityMaxArchivesFeedback"
+                                   value="${activityMaxArchives}" min="1" max="100" step="5" />
+                            <button type="button" class="num-spinner-btn increment" data-target="activityMaxArchivesInput" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Increase max archived activity sessions', '增大活动归档会话上限'))}">+</button>
+                        </div>
+                        <span id="activityMaxArchivesFeedback" class="threshold-feedback" role="status"></span>
+                    </div>
+                </div>
+            </div>
+        </section>`;
+    const statusBarTitleHtml = isAppSidecar
+        ? (0, webview_helpers_1.tBiHtml)('Antigravity IDE Status Bar', 'Antigravity IDE 状态栏')
+        : (0, webview_helpers_1.tBiHtml)('Status Bar Display', '状态栏显示');
+    const statusBarDescHtml = isAppSidecar
+        ? (0, webview_helpers_1.tBiHtml)('These status bar toggles apply to the Antigravity IDE extension. In Antigravity App, use App Ambient Overlays above or view telemetry in the side pane.', '以下状态栏开关仅对 Antigravity IDE 扩展生效。在 Antigravity App 中，请使用上方的 App 桌面悬浮组件或在辅助面板中查看。')
+        : (0, webview_helpers_1.tBiHtml)('Toggle which elements appear in the status bar.', '控制状态栏显示哪些元素。');
+    const zoomPresetButtons = [80, 90, 100, 110, 120, 130]
+        .map(pct => `<button type="button" class="preset-btn zoom-preset${resolvedZoom === pct ? ' is-active' : ''}" data-zoom="${pct}">${pct}%</button>`)
+        .join('\n                    ');
+    return `
+        ${storageCard}
+
+        ${appOverlaysCard}
+
+        ${updatesCard}
+
+        ${costCurrencyHistoryCard}
+
+        <section class="stg-card" data-accent="quota">
+            <div class="stg-header">
+                <span class="stg-header-icon">${webview_icons_1.ICON.bolt}</span>
+                <h2>${(0, webview_helpers_1.tBiHtml)('Quota Notification', '配额通知')}</h2>
+            </div>
+            <div class="setting-row">
+                <label for="quotaNotifyInput">${(0, webview_helpers_1.tBiHtml)('Low quota warning threshold (%)', '低配额警告阈值（%）')}</label>
+                <p class="raw-desc">${(0, webview_helpers_1.tBiHtml)('Show a warning banner (App & IDE) and system notification (IDE) when any quota pool drops to or below this percentage. Set to 0 to disable.', '当任何配额池剩余比例降至或低于此百分比时，在面板顶部显示警告横幅（App 与 IDE 均生效）并在 IDE 弹出通知。设为 0 可禁用。')}</p>
+                <div class="threshold-input-row">
+                    <div class="num-spinner">
+                        <button type="button" class="num-spinner-btn decrement" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Decrease quota warning threshold', '降低配额警告阈值'))}">−</button>
+                        <input type="number" id="quotaNotifyInput" class="threshold-input"
+                               value="${quotaNotifyThreshold}" min="0" max="99" step="5" />
+                        <button type="button" class="num-spinner-btn increment" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Increase quota warning threshold', '提高配额警告阈值'))}">+</button>
+                    </div>
+                    <button type="button" class="action-btn" id="quotaNotifySaveBtn"><span>${(0, webview_helpers_1.tBiHtml)('Save', '保存')}</span></button>
+                    <span id="quotaNotifyFeedback" class="threshold-feedback" role="status"></span>
+                </div>
+            </div>
+        </section>
+
+        <section class="stg-card" data-accent="poll">
+            <div class="stg-header">
+                <span class="stg-header-icon">${webview_icons_1.ICON.clock}</span>
+                <h2>${(0, webview_helpers_1.tBiHtml)('Polling', '轮询')}</h2>
+            </div>
+            <div class="setting-row">
+                <label for="pollingInput">${(0, webview_helpers_1.tBiHtml)('Polling interval (seconds)', '轮询间隔（秒）')}</label>
+                <div class="threshold-input-row">
+                    <div class="num-spinner">
+                        <button type="button" class="num-spinner-btn decrement" data-target="pollingInput" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Decrease polling interval', '减小轮询间隔'))}">−</button>
+                        <input type="number" id="pollingInput" class="threshold-input"
+                               value="${pollingInterval}" min="1" max="60" step="1" />
+                        <button type="button" class="num-spinner-btn increment" data-target="pollingInput" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Increase polling interval', '增大轮询间隔'))}">+</button>
+                    </div>
+                    <button type="button" class="action-btn" id="pollingSaveBtn"><span>${(0, webview_helpers_1.tBiHtml)('Save', '保存')}</span></button>
+                    <span id="pollingFeedback" class="threshold-feedback" role="status"></span>
+                </div>
+            </div>
+        </section>
+
+        <section class="stg-card${isAppSidecar ? ' is-ide-only' : ''}" data-accent="display" data-surface-scope="ide-only">
+            <details id="settings-ide-status-bar" class="stg-card-details" data-state-key="settings-ide-status-bar"${isAppSidecar ? '' : ' open'}>
+                <summary class="stg-header stg-card-summary">
+                    <span class="stg-header-icon">${webview_icons_1.ICON.chart}</span>
+                    <h2>${statusBarTitleHtml}</h2>
+                    ${isAppSidecar ? `<span class="stg-ide-only-badge">${(0, webview_helpers_1.tBiHtml)('IDE Only', '仅 IDE')}</span>` : ''}
+                </summary>
+                <div class="stg-card-details-body">
+                    <p class="raw-desc">${statusBarDescHtml}</p>
+                    <div class="toggle-group">
+                        <label class="toggle-row">
+                            <input type="checkbox" id="toggleContext" class="toggle-cb" ${showContext ? 'checked' : ''}${ideOnlyDisabledAttr} />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                            <span>${(0, webview_helpers_1.tBiHtml)('Context usage', '上下文用量')} <code>45k/1M</code></span>
+                        </label>
+                        <label class="toggle-row">
+                            <input type="checkbox" id="toggleQuota" class="toggle-cb" ${showQuota ? 'checked' : ''}${ideOnlyDisabledAttr} />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                            <span>${(0, webview_helpers_1.tBiHtml)('Quota remaining', '剩余配额')} <code>85%</code></span>
+                        </label>
+                        <label class="toggle-row">
+                            <input type="checkbox" id="toggleCountdown" class="toggle-cb" ${showResetCountdown ? 'checked' : ''}${ideOnlyDisabledAttr} />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                            <span>${(0, webview_helpers_1.tBiHtml)('Reset countdown', '重置倒计时')} <code>4h32m</code></span>
+                        </label>
+                        <label class="toggle-row">
+                            <input type="checkbox" id="toggleAiCredits" class="toggle-cb" ${showAiCredits ? 'checked' : ''}${ideOnlyDisabledAttr} />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                            <span>${(0, webview_helpers_1.tBiHtml)('AI Credits balance', 'AI 积分余额')} <code>14,701</code></span>
+                        </label>
+                        <label class="toggle-row">
+                            <input type="checkbox" id="toggleSpeed" class="toggle-cb" ${showSpeed ? 'checked' : ''}${ideOnlyDisabledAttr} />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                            <span>${(0, webview_helpers_1.tBiHtml)('Generation speed', '生成速度')} <code>64 tok/s</code></span>
+                        </label>
+                        <label class="toggle-row">
+                            <input type="checkbox" id="toggleCacheHit" class="toggle-cb" ${showCacheHit ? 'checked' : ''}${ideOnlyDisabledAttr} />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                            <span>${(0, webview_helpers_1.tBiHtml)('Prompt cache hit rate', '提示词缓存命中率')} <code>Cache 84%</code></span>
+                        </label>
+                        <label class="toggle-row">
+                            <input type="checkbox" id="toggleSessionCost" class="toggle-cb" ${showSessionCost ? 'checked' : ''}${ideOnlyDisabledAttr} />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                            <span>${(0, webview_helpers_1.tBiHtml)('Session cost', '当前会话费用')} <code>$0.27</code></span>
+                        </label>
+                    </div>
+                    <label class="stg-select-row" for="statusTooltipDensity">
+                        <span>${(0, webview_helpers_1.tBiHtml)('Hover density', '悬停摘要密度')}</span>
+                        <select id="statusTooltipDensity"${ideOnlyDisabledAttr}>
+                            <option value="auto"${tooltipDensity === 'auto' ? ' selected' : ''}>${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Automatic', '自动'))}</option>
+                            <option value="compact"${tooltipDensity === 'compact' ? ' selected' : ''}>${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Compact', '精简'))}</option>
+                            <option value="full"${tooltipDensity === 'full' ? ' selected' : ''}>${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Full', '完整'))}</option>
+                        </select>
+                    </label>
+                </div>
+            </details>
+        </section>
+
+        <section class="stg-card" data-accent="display">
+            <div class="stg-header">
+                <span class="stg-header-icon">${webview_icons_1.ICON.chart}</span>
+                <h2>${(0, webview_helpers_1.tBiHtml)('Advanced Display', '高级显示')}</h2>
+            </div>
+            <p class="raw-desc">${(0, webview_helpers_1.tBiHtml)('Control diagnostic visibility and conversation focus behavior across Antigravity IDE and App.', '控制诊断信息展示及跨 Antigravity IDE 与 App 的会话跟踪行为。')}</p>
+            <div class="toggle-group">
+                <label class="toggle-row">
+                    <input type="checkbox" id="toggleLockMainAgent" class="toggle-cb" ${lockToMainAgent ? 'checked' : ''} />
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                    <span>${(0, webview_helpers_1.tBiHtml)('Lock to Main Agent (ignore background subagents)', '锁定主会话（忽略后台子智能体）')}</span>
+                </label>
+                <label class="toggle-row">
+                    <input type="checkbox" id="toggleModelInternalId" class="toggle-cb" ${showModelInternalId ? 'checked' : ''} />
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                    <span>${(0, webview_helpers_1.tBiHtml)('Show model internal ID', '显示模型内部 ID')} <code>(M16)</code></span>
+                </label>
+            </div>
+        </section>
+
+        <section class="stg-card" data-accent="zoom">
+            <div class="stg-header">
+                <span class="stg-header-icon">${webview_icons_1.ICON.zoom}</span>
+                <h2>${(0, webview_helpers_1.tBiHtml)('Interface Zoom', '界面缩放')}</h2>
+            </div>
+            <p class="raw-desc">${(0, webview_helpers_1.tBiHtml)('Scale all content in the panel. Applies to text, icons, and spacing.', '缩放面板中的所有内容。对文字、图标和间距统一生效。')}</p>
+            <div class="zoom-control">
+                <div class="zoom-presets">
+                    ${zoomPresetButtons}
+                </div>
+                <div class="zoom-slider-row">
+                    <input type="range" id="zoomRange" class="zoom-range" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Interface zoom', '界面缩放'))}"
+                           min="60" max="150" step="5" value="${resolvedZoom}" />
+                    <span class="zoom-value" id="zoomValue">${resolvedZoom}%</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="stg-card" data-accent="history">
+            <div class="stg-header">
+                <span class="stg-header-icon">${webview_icons_1.ICON.timeline}</span>
+                <h2>${(0, webview_helpers_1.tBiHtml)('Panel Tips', '界面提示')}</h2>
+            </div>
+            <p class="raw-desc">${(0, webview_helpers_1.tBiHtml)('This state only means whether auto-display is enabled. It does not mean the hint is currently visible at the top. Use the button below to show it immediately once.', '这里的状态只表示“是否启用自动提示”，不代表顶部当前一定可见。要立刻看到这条提示，请用下面的按钮显示一次。')}</p>
+            <div class="storage-actions">
+                <button type="button" class="action-btn" id="restoreTabScrollHint">${webview_icons_1.ICON.refresh} <span>${(0, webview_helpers_1.tBiHtml)('Show Hint Now', '立即显示一次提示')}</span></button>
+                <span class="storage-path-state ${tabScrollHintEnabled ? 'is-ready' : 'is-missing'}" id="tabHintState">
+                    <span>${tabScrollHintEnabled ? (0, webview_helpers_1.tBiHtml)('Auto Hint Enabled', '自动提示已开启') : (0, webview_helpers_1.tBiHtml)('Auto Hint Disabled', '自动提示已关闭')}</span>
+                </span>
+                <span id="panelHintFeedback" class="threshold-feedback" role="status"></span>
+            </div>
+        </section>
+
+        <section class="stg-card" data-accent="display">
+            <div class="stg-header">
+                <span class="stg-header-icon">${webview_icons_1.ICON.chart}</span>
+                <h2>${(0, webview_helpers_1.tBiHtml)('Scrollbar Appearance', '滚动条外观')}</h2>
+            </div>
+            <p class="raw-desc">${(0, webview_helpers_1.tBiHtml)('Control scrollbar visibility and end-of-content indicators across all tabs.', '控制所有选项卡的滚动条可见性和「已到底」提示。')}</p>
+            <div class="toggle-group">
+                <label class="toggle-row">
+                    <input type="checkbox" id="toggleScrollbar" class="toggle-cb" ${showScrollbar ? 'checked' : ''} />
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                    <span>${(0, webview_helpers_1.tBiHtml)('Show scrollbar', '显示滚动条')}</span>
+                </label>
+                <label class="toggle-row">
+                    <input type="checkbox" id="toggleEndOfContent" class="toggle-cb" ${showEndOfContent ? 'checked' : ''} />
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                    <span>${(0, webview_helpers_1.tBiHtml)('Show "end of content" indicator', '显示「已到底」提示')}</span>
+                </label>
+            </div>
+        </section>
+    `;
+}
+//# sourceMappingURL=webview-settings-tab.js.map

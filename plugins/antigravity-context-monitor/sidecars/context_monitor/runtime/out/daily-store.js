@@ -1,0 +1,641 @@
+"use strict";
+// ─── Daily Store ─────────────────────────────────────────────────────────────
+// Aggregates Activity, GM, and Pricing snapshots by date for the Calendar tab.
+// Each day gets a single aggregated entry, written when the local date rolls over.
+// Persisted via globalState for cross-session survival.
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.DailyStore = exports.MAX_RETENTION_DAYS = exports.MIN_RETENTION_DAYS = exports.DEFAULT_MAX_DAYS = void 0;
+exports.buildGMPerModelStats = buildGMPerModelStats;
+exports.computeAdditiveTokens = computeAdditiveTokens;
+exports.computeCycleTokenTotals = computeCycleTokenTotals;
+exports.getCycleSurfaces = getCycleSurfaces;
+const daily_ledger_1 = require("./daily-ledger");
+const models_1 = require("./models");
+const pricing_store_1 = require("./pricing-store");
+const telemetry_metrics_1 = require("./telemetry-metrics");
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+/** Extract 'YYYY-MM-DD' from an ISO timestamp using LOCAL time */
+function toDateKey(iso) {
+    const d = new Date(iso);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+}
+/** Get distinct model names from an ActivitySummary's modelStats */
+function extractModelNames(modelStats) {
+    return Object.keys(modelStats);
+}
+function buildPerModelStats(modelStats) {
+    const perModel = {};
+    for (const [name, ms] of Object.entries(modelStats)) {
+        perModel[name] = {
+            reasoning: ms.reasoning,
+            toolCalls: ms.toolCalls,
+            errors: ms.errors,
+            estSteps: ms.estSteps,
+            inputTokens: ms.inputTokens,
+            outputTokens: ms.outputTokens,
+        };
+    }
+    return Object.keys(perModel).length > 0 ? perModel : undefined;
+}
+function buildGMPerModelStats(gmSummaryOrBreakdown, costPerModel) {
+    const breakdown = gmSummaryOrBreakdown && 'modelBreakdown' in gmSummaryOrBreakdown
+        ? gmSummaryOrBreakdown.modelBreakdown
+        : gmSummaryOrBreakdown || undefined;
+    if (!breakdown) {
+        return undefined;
+    }
+    const gmPerModel = {};
+    for (const [name, ms] of Object.entries(breakdown)) {
+        const totalPromptTokens = (ms.totalInputTokens || 0)
+            + (ms.totalCacheRead || 0)
+            + (ms.totalCacheCreation || 0);
+        const tokenCacheHitRate = totalPromptTokens > 0
+            ? Math.min(1, Math.max(0, (ms.totalCacheRead || 0) / totalPromptTokens))
+            : undefined;
+        let avgGenTokPerSec;
+        if (ms.timedOutputTokens && ms.timedOutputTokens >= telemetry_metrics_1.MIN_OUTPUT_TOKENS_FOR_SPEED
+            && ms.timedStreamingSeconds && ms.timedStreamingSeconds >= telemetry_metrics_1.MIN_STREAM_SECONDS) {
+            avgGenTokPerSec = ms.timedOutputTokens / ms.timedStreamingSeconds;
+        }
+        else if (ms.timedOutputTokens === undefined && ms.timedStreamingSeconds === undefined
+            && ms.avgStreaming >= telemetry_metrics_1.MIN_STREAM_SECONDS
+            && ms.totalOutputTokens >= telemetry_metrics_1.MIN_OUTPUT_TOKENS_FOR_SPEED
+            && ms.callCount > 0) {
+            const streamCount = ms.streamingSampleCount !== undefined ? ms.streamingSampleCount : ms.callCount;
+            const totalStream = ms.avgStreaming * streamCount;
+            if (streamCount > 0 && totalStream >= telemetry_metrics_1.MIN_STREAM_SECONDS) {
+                avgGenTokPerSec = ms.totalOutputTokens / totalStream;
+            }
+        }
+        const entry = {
+            calls: ms.callCount,
+            credits: ms.totalCredits,
+            inputTokens: ms.totalInputTokens,
+            outputTokens: ms.totalOutputTokens,
+            thinkingTokens: ms.totalThinkingTokens,
+            avgTTFT: ms.avgTTFT,
+            cacheHitRate: ms.cacheHitRate,
+            estimatedCost: costPerModel?.[name],
+            cacheReadTokens: ms.totalCacheRead,
+            cacheCreationTokens: ms.totalCacheCreation,
+        };
+        if (ms.avgStreaming > 0) {
+            entry.avgStreaming = ms.avgStreaming;
+        }
+        if (avgGenTokPerSec !== undefined && Number.isFinite(avgGenTokPerSec) && avgGenTokPerSec > 0) {
+            entry.avgGenTokPerSec = avgGenTokPerSec;
+        }
+        if (tokenCacheHitRate !== undefined) {
+            entry.tokenCacheHitRate = tokenCacheHitRate;
+        }
+        gmPerModel[name] = entry;
+    }
+    return Object.keys(gmPerModel).length > 0 ? gmPerModel : undefined;
+}
+/**
+ * Whether a cycle's day total is fully explained by the rows that already carry a cost.
+ *
+ * Filling a row also adds its cost to the day total, which is only correct if that money is not
+ * in the total already. It can be: the legacy archival path used to key per-model costs by the
+ * normalized display name while the rows are keyed by the raw model id, so when those disagreed
+ * every row was written without a cost even though the day total held the full amount. Adding to
+ * that total would double the day, permanently and with no trace — a second run would find every
+ * row priced and report nothing to fix. When the total exceeds what the priced rows account for,
+ * the excess belongs to the unpriced rows, so leave the cycle alone.
+ */
+function cycleTotalIsAccountedFor(cycle) {
+    const total = cycle.estimatedCost || 0;
+    if (total <= 0) {
+        return true;
+    }
+    let priced = 0;
+    for (const gms of Object.values(cycle.gmModelStats || {})) {
+        priced += gms.estimatedCost || 0;
+    }
+    // Tolerance covers float drift from summing many per-call costs, not a real shortfall.
+    return total - priced <= Math.max(1e-9, total * 1e-9);
+}
+function safeNonNeg(n) {
+    return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : 0;
+}
+/**
+ * Antigravity additive token total:
+ * `inputTokens + cacheReadTokens + cacheCreationTokens + outputTokens`.
+ * `thinkingTokens` is strictly a subset of `outputTokens` and is never added a second time.
+ */
+function computeAdditiveTokens(t) {
+    return safeNonNeg(t.inputTokens)
+        + safeNonNeg(t.cacheReadTokens)
+        + safeNonNeg(t.cacheCreationTokens)
+        + safeNonNeg(t.outputTokens);
+}
+/**
+ * Compute additive token totals and breakdown for a single {@link DailyCycleEntry}.
+ * Uses `gmModelStats` when present (most exact), with graceful fallback to cycle-level
+ * fields for legacy archived records.
+ */
+function computeCycleTokenTotals(cycle) {
+    if (cycle.gmModelStats && Object.keys(cycle.gmModelStats).length > 0) {
+        let inputTokens = 0;
+        let outputTokens = 0;
+        let thinkingTokens = 0;
+        let cacheReadTokens = 0;
+        let cacheCreationTokens = 0;
+        for (const gm of Object.values(cycle.gmModelStats)) {
+            inputTokens += safeNonNeg(gm.inputTokens);
+            outputTokens += safeNonNeg(gm.outputTokens);
+            thinkingTokens += safeNonNeg(gm.thinkingTokens);
+            cacheReadTokens += safeNonNeg(gm.cacheReadTokens);
+            cacheCreationTokens += safeNonNeg(gm.cacheCreationTokens);
+        }
+        return {
+            inputTokens,
+            outputTokens,
+            thinkingTokens,
+            cacheReadTokens,
+            cacheCreationTokens,
+            totalTokens: inputTokens + cacheReadTokens + cacheCreationTokens + outputTokens,
+        };
+    }
+    const cacheReadTokens = safeNonNeg(cycle.gmTotalCacheRead);
+    const cacheCreationTokens = safeNonNeg(cycle.gmTotalCacheCreation);
+    const thinkingTokens = safeNonNeg(cycle.gmTotalThinkingTokens);
+    const inputTokens = safeNonNeg(cycle.totalInputTokens);
+    const outputTokens = safeNonNeg(cycle.totalOutputTokens);
+    const fallbackAll = safeNonNeg(cycle.gmTotalAllTokens);
+    const fallbackLegacy = safeNonNeg(cycle.gmTotalTokens);
+    const totalTokens = fallbackAll > 0
+        ? fallbackAll
+        : (fallbackLegacy > 0
+            ? fallbackLegacy + cacheReadTokens + cacheCreationTokens
+            : inputTokens + cacheReadTokens + cacheCreationTokens + outputTokens);
+    return {
+        inputTokens,
+        outputTokens,
+        thinkingTokens,
+        cacheReadTokens,
+        cacheCreationTokens,
+        totalTokens,
+    };
+}
+/** Extract distinct surfaces present on a cycle (backward-compatible default: ['unknown']). */
+function getCycleSurfaces(cycle) {
+    const out = new Set();
+    if (cycle.surfaceBreakdown) {
+        for (const [key, stats] of Object.entries(cycle.surfaceBreakdown)) {
+            if (stats && (stats.calls > 0 || computeAdditiveTokens(stats) > 0 || stats.estimatedCost > 0)) {
+                out.add((0, daily_ledger_1.normalizeUsageSurface)(key));
+            }
+        }
+    }
+    if (out.size === 0) {
+        out.add((0, daily_ledger_1.normalizeUsageSurface)(cycle.surface));
+    }
+    return [...out];
+}
+// ─── Constants ───────────────────────────────────────────────────────────────
+const STORAGE_KEY = 'dailyStoreState';
+/** Default retention supports a full 52-week/year heatmap plus buffer (400 days). */
+exports.DEFAULT_MAX_DAYS = 400;
+exports.MIN_RETENTION_DAYS = 7;
+exports.MAX_RETENTION_DAYS = 3650;
+function normalizeMaxDays(days) {
+    if (typeof days !== 'number' || !Number.isFinite(days)) {
+        return exports.DEFAULT_MAX_DAYS;
+    }
+    return Math.min(exports.MAX_RETENTION_DAYS, Math.max(exports.MIN_RETENTION_DAYS, Math.floor(days)));
+}
+// ─── DailyStore Class ────────────────────────────────────────────────────────
+class DailyStore {
+    _records = new Map();
+    _maxDays = exports.DEFAULT_MAX_DAYS;
+    _globalState = null;
+    constructor(maxDays) {
+        this._maxDays = normalizeMaxDays(maxDays);
+    }
+    /** Current configured maximum number of days retained. */
+    get maxDays() { return this._maxDays; }
+    /** Update maximum retention days (clamped to 7–3650) and trim excess oldest records. */
+    setMaxDays(days) {
+        const next = normalizeMaxDays(days);
+        if (next === this._maxDays) {
+            return;
+        }
+        this._maxDays = next;
+        const sizeBefore = this._records.size;
+        this._trimOld();
+        if (this._records.size !== sizeBefore) {
+            this._persist();
+        }
+    }
+    /** Initialize from globalState */
+    init(globalState, options) {
+        this._globalState = globalState;
+        if (options?.maxDays !== undefined) {
+            this._maxDays = normalizeMaxDays(options.maxDays);
+        }
+        const saved = globalState.get(STORAGE_KEY, null);
+        if (saved && saved.version === 1 && saved.records) {
+            for (const [date, record] of Object.entries(saved.records)) {
+                this._records.set(date, record);
+            }
+        }
+        this._trimOld();
+    }
+    /**
+     * Merge external records into this store (for data migration/recovery).
+     * Only adds records for dates not already present — existing data is never overwritten.
+     * Returns the number of records added.
+     */
+    mergeRecords(externalState) {
+        if (!externalState || externalState.version !== 1 || !externalState.records) {
+            return 0;
+        }
+        let added = 0;
+        for (const [date, record] of Object.entries(externalState.records)) {
+            if (!this._records.has(date)) {
+                this._records.set(date, record);
+                added++;
+            }
+        }
+        if (added > 0) {
+            this._trimOld();
+            this._persist();
+        }
+        return added;
+    }
+    /**
+     * Fill in per-model costs that were archived without one.
+     *
+     * A call is priced when it is recorded, so a model the platform ships mid-cycle — one
+     * with no row in the pricing table yet — is recorded at $0 and then frozen into the
+     * archive that way. Once the price row lands, the tokens are still there and the cost
+     * can be recovered.
+     *
+     * Fill-only, never overwrite: a row already holding a number was priced correctly when
+     * it was written and comes out identical. That is also what makes this safe to run on
+     * every activation instead of behind a one-shot flag — it is self-healing and
+     * idempotent, so a row whose model is still unknown today gets filled by whichever
+     * future release adds that price.
+     *
+     * What it writes is an UNDERESTIMATE, and is flagged `costBackfilled` to say so:
+     * GMModelCycleStats never kept cache tokens, so only input + output + thinking survive
+     * to be re-priced. A model that resolves to no pricing at all is left alone with its
+     * cost still absent — writing 0 there would be indistinguishable from a real $0 day.
+     *
+     * Returns the number of per-model rows filled.
+     */
+    backfillMissingCosts(customPricing = {}, opts) {
+        const base = opts?.basePricing || pricing_store_1.DEFAULT_PRICING;
+        let filled = 0;
+        for (const [date, record] of this._records) {
+            for (const cycle of record.cycles) {
+                if (!cycle.gmModelStats) {
+                    continue;
+                }
+                if (!cycleTotalIsAccountedFor(cycle)) {
+                    continue;
+                }
+                let cycleDelta = 0;
+                for (const [modelKey, gms] of Object.entries(cycle.gmModelStats)) {
+                    if (gms.estimatedCost !== undefined) {
+                        continue;
+                    }
+                    const pricing = (0, pricing_store_1.findPricingForDate)(modelKey, customPricing, date, base);
+                    if (!pricing) {
+                        continue;
+                    }
+                    const cost = (0, pricing_store_1.costFromTokens)({
+                        inputTokens: gms.inputTokens,
+                        outputTokens: gms.outputTokens,
+                        thinkingTokens: gms.thinkingTokens,
+                        cacheReadTokens: gms.cacheReadTokens || 0,
+                    }, pricing);
+                    if (cost <= 0) {
+                        continue;
+                    }
+                    gms.estimatedCost = cost;
+                    gms.costBackfilled = true;
+                    cycleDelta += cost;
+                    filled++;
+                }
+                // Keep the day total in step with its rows, or getMonthSummary and
+                // getMonthCostBreakdown would report different numbers for the same day.
+                if (cycleDelta > 0) {
+                    cycle.estimatedCost = (cycle.estimatedCost || 0) + cycleDelta;
+                }
+            }
+        }
+        if (filled > 0) {
+            this._persist();
+        }
+        return filled;
+    }
+    /**
+     * Add a daily snapshot from Activity + GM summaries.
+     * Called when the local date rolls over (performDailyArchival).
+     * Each day gets exactly one entry; calling again for the same date replaces it.
+     */
+    addDailySnapshot(dateKey, activitySummary, gmSummary, costTotal, costPerModel, 
+    /** If true, appends a cycle instead of replacing the day's entry. */
+    append, 
+    /** Optional surface/account metadata for source tagging. */
+    meta) {
+        let record = this._records.get(dateKey);
+        if (!record) {
+            record = { date: dateKey, cycles: [] };
+            this._records.set(dateKey, record);
+        }
+        const entry = {
+            startTime: `${dateKey}T00:00:00`,
+            endTime: new Date().toISOString(),
+            totalReasoning: activitySummary.totalReasoning,
+            totalToolCalls: activitySummary.totalToolCalls,
+            totalErrors: activitySummary.totalErrors,
+            totalInputTokens: activitySummary.totalInputTokens,
+            totalOutputTokens: activitySummary.totalOutputTokens,
+            estSteps: activitySummary.estSteps,
+            modelNames: extractModelNames(activitySummary.modelStats),
+            modelStats: buildPerModelStats(activitySummary.modelStats),
+        };
+        if (gmSummary) {
+            entry.gmTotalCalls = gmSummary.totalCalls;
+            entry.gmTotalCredits = gmSummary.totalCredits;
+            entry.gmTotalTokens = gmSummary.totalInputTokens + gmSummary.totalOutputTokens;
+            const additiveTotal = computeAdditiveTokens({
+                inputTokens: gmSummary.totalInputTokens,
+                outputTokens: gmSummary.totalOutputTokens,
+                cacheReadTokens: gmSummary.totalCacheRead,
+                cacheCreationTokens: gmSummary.totalCacheCreation,
+            });
+            if (additiveTotal > 0) {
+                entry.gmTotalAllTokens = additiveTotal;
+            }
+            if (gmSummary.totalCacheRead > 0) {
+                entry.gmTotalCacheRead = gmSummary.totalCacheRead;
+            }
+            if (gmSummary.totalCacheCreation > 0) {
+                entry.gmTotalCacheCreation = gmSummary.totalCacheCreation;
+            }
+            if (gmSummary.totalThinkingTokens > 0) {
+                entry.gmTotalThinkingTokens = gmSummary.totalThinkingTokens;
+            }
+            if (gmSummary.totalRetryTokens > 0) {
+                entry.gmRetryTokens = gmSummary.totalRetryTokens;
+                entry.gmRetryCredits = gmSummary.totalRetryCredits;
+                entry.gmRetryCount = gmSummary.totalRetryCount;
+            }
+        }
+        if (costTotal !== undefined && costTotal > 0) {
+            entry.estimatedCost = costTotal;
+        }
+        entry.gmModelStats = buildGMPerModelStats(gmSummary, costPerModel);
+        if (meta?.accountEmail) {
+            entry.accountEmail = meta.accountEmail;
+        }
+        const surface = (0, daily_ledger_1.normalizeUsageSurface)(meta?.surface);
+        if (surface !== 'unknown') {
+            entry.surface = surface;
+        }
+        const clonedBreakdown = (0, daily_ledger_1.cloneSurfaceBreakdown)(meta?.surfaceBreakdown);
+        if (clonedBreakdown) {
+            entry.surfaceBreakdown = clonedBreakdown;
+        }
+        if (append) {
+            record.cycles.push(entry);
+        }
+        else {
+            // One entry per day — replace existing
+            record.cycles = [entry];
+        }
+        this._trimOld();
+        this._persist();
+    }
+    /**
+     * @deprecated Legacy method — kept for backward compatibility with old archive format.
+     * New code should use addDailySnapshot() instead.
+     */
+    addCycle(archive, gmSummary, costTotal, costPerModel, accountEmail, surface) {
+        const dateKey = toDateKey(archive.endTime);
+        let record = this._records.get(dateKey);
+        if (!record) {
+            record = { date: dateKey, cycles: [] };
+            this._records.set(dateKey, record);
+        }
+        const s = archive.summary;
+        const cycle = {
+            startTime: archive.startTime,
+            endTime: archive.endTime,
+            triggeredBy: archive.triggeredBy,
+            totalReasoning: s.totalReasoning,
+            totalToolCalls: s.totalToolCalls,
+            totalErrors: s.totalErrors,
+            totalInputTokens: s.totalInputTokens,
+            totalOutputTokens: s.totalOutputTokens,
+            estSteps: s.estSteps,
+            modelNames: extractModelNames(s.modelStats),
+            modelStats: buildPerModelStats(s.modelStats),
+        };
+        if (gmSummary) {
+            cycle.gmTotalCalls = gmSummary.totalCalls;
+            cycle.gmTotalCredits = gmSummary.totalCredits;
+            cycle.gmTotalTokens = gmSummary.totalInputTokens + gmSummary.totalOutputTokens;
+            const additiveTotal = computeAdditiveTokens({
+                inputTokens: gmSummary.totalInputTokens,
+                outputTokens: gmSummary.totalOutputTokens,
+                cacheReadTokens: gmSummary.totalCacheRead,
+                cacheCreationTokens: gmSummary.totalCacheCreation,
+            });
+            if (additiveTotal > 0) {
+                cycle.gmTotalAllTokens = additiveTotal;
+            }
+            if (gmSummary.totalCacheRead > 0) {
+                cycle.gmTotalCacheRead = gmSummary.totalCacheRead;
+            }
+            if (gmSummary.totalCacheCreation > 0) {
+                cycle.gmTotalCacheCreation = gmSummary.totalCacheCreation;
+            }
+            if (gmSummary.totalThinkingTokens > 0) {
+                cycle.gmTotalThinkingTokens = gmSummary.totalThinkingTokens;
+            }
+            if (gmSummary.totalRetryTokens > 0) {
+                cycle.gmRetryTokens = gmSummary.totalRetryTokens;
+                cycle.gmRetryCredits = gmSummary.totalRetryCredits;
+                cycle.gmRetryCount = gmSummary.totalRetryCount;
+            }
+        }
+        if (costTotal !== undefined && costTotal > 0) {
+            cycle.estimatedCost = costTotal;
+        }
+        cycle.gmModelStats = buildGMPerModelStats(gmSummary, costPerModel);
+        if (accountEmail) {
+            cycle.accountEmail = accountEmail;
+        }
+        const normSurface = (0, daily_ledger_1.normalizeUsageSurface)(surface);
+        if (normSurface !== 'unknown') {
+            cycle.surface = normSurface;
+        }
+        record.cycles.push(cycle);
+        this._trimOld();
+        this._persist();
+    }
+    // importArchives() removed — daily archival no longer needs retroactive backfill.
+    /** Get record for a specific date, or null */
+    getRecord(date) {
+        return this._records.get(date) || null;
+    }
+    /** Get all dates that have data, sorted descending */
+    getDatesWithData() {
+        return [...this._records.keys()].sort().reverse();
+    }
+    /** Get all recorded days, sorted ascending by date */
+    getAllRecords() {
+        return [...this._records.entries()]
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([, rec]) => rec);
+    }
+    /** Get summary data for each day in a month (for calendar grid) */
+    getMonthSummary(year, month) {
+        const prefix = `${year}-${String(month).padStart(2, '0')}`;
+        const results = [];
+        for (const [date, record] of this._records) {
+            if (!date.startsWith(prefix)) {
+                continue;
+            }
+            let totalReasoning = 0, totalToolCalls = 0, totalCost = 0, gmCalls = 0;
+            let totalTokens = 0, inputTokens = 0, outputTokens = 0;
+            let cacheReadTokens = 0, cacheCreationTokens = 0, thinkingTokens = 0;
+            const surfaces = new Set();
+            for (const c of record.cycles) {
+                totalReasoning += c.totalReasoning;
+                totalToolCalls += c.totalToolCalls;
+                totalCost += Number.isFinite(c.estimatedCost) ? (c.estimatedCost || 0) : 0;
+                gmCalls += c.gmTotalCalls || 0;
+                const tok = computeCycleTokenTotals(c);
+                totalTokens += tok.totalTokens;
+                inputTokens += tok.inputTokens;
+                outputTokens += tok.outputTokens;
+                cacheReadTokens += tok.cacheReadTokens;
+                cacheCreationTokens += tok.cacheCreationTokens;
+                thinkingTokens += tok.thinkingTokens;
+                for (const s of getCycleSurfaces(c)) {
+                    surfaces.add(s);
+                }
+            }
+            results.push({
+                date,
+                cycleCount: record.cycles.length,
+                totalReasoning,
+                totalToolCalls,
+                totalCost,
+                gmCalls,
+                totalTokens,
+                inputTokens,
+                outputTokens,
+                cacheReadTokens,
+                cacheCreationTokens,
+                thinkingTokens,
+                surfaces: [...surfaces],
+            });
+        }
+        return results;
+    }
+    /**
+     * Aggregate per-model cost data across all cycles in a given month.
+     * Returns per-model breakdown and a grand total from archived cycles.
+     */
+    getMonthCostBreakdown(year, month) {
+        const prefix = `${year}-${String(month).padStart(2, '0')}`;
+        const models = new Map();
+        let grandTotal = 0;
+        let cycleCount = 0;
+        let earliestDate = '';
+        for (const [date, record] of this._records) {
+            if (!date.startsWith(prefix)) {
+                continue;
+            }
+            if (!earliestDate || date < earliestDate) {
+                earliestDate = date;
+            }
+            for (const cycle of record.cycles) {
+                cycleCount++;
+                const cycleCost = cycle.estimatedCost || 0;
+                grandTotal += cycleCost;
+                // Aggregate per-model from gmModelStats
+                if (cycle.gmModelStats) {
+                    for (const [rawName, gms] of Object.entries(cycle.gmModelStats)) {
+                        const name = (0, models_1.normalizeModelDisplayName)(rawName) || rawName;
+                        let entry = models.get(name);
+                        if (!entry) {
+                            entry = { name, totalCost: 0, calls: 0, inputTokens: 0, outputTokens: 0, thinkingTokens: 0, credits: 0 };
+                            models.set(name, entry);
+                        }
+                        entry.totalCost += gms.estimatedCost || 0;
+                        entry.calls += gms.calls;
+                        entry.inputTokens += gms.inputTokens;
+                        entry.outputTokens += gms.outputTokens;
+                        entry.thinkingTokens += gms.thinkingTokens;
+                        entry.credits += gms.credits;
+                    }
+                }
+            }
+        }
+        const modelRows = [...models.values()].sort((a, b) => b.totalCost - a.totalCost);
+        return {
+            year,
+            month,
+            grandTotal,
+            cycleCount,
+            earliestDate,
+            models: modelRows,
+        };
+    }
+    /** Total number of recorded days */
+    get totalDays() { return this._records.size; }
+    /** Clear all history. */
+    clear() {
+        this._records.clear();
+        this._persist();
+    }
+    /** Serialize to plain object */
+    serialize() {
+        const records = {};
+        for (const [date, record] of this._records) {
+            records[date] = record;
+        }
+        return { version: 1, records };
+    }
+    /** Restore the full in-memory snapshot and persist it back to storage. */
+    restoreSnapshot(state) {
+        this._records.clear();
+        if (state && state.version === 1 && state.records) {
+            for (const [date, record] of Object.entries(state.records)) {
+                this._records.set(date, record);
+            }
+        }
+        this._trimOld();
+        this._persist();
+    }
+    // ─── Internal ────────────────────────────────────────────────────────
+    /** Remove records older than _maxDays */
+    _trimOld() {
+        if (this._records.size <= this._maxDays) {
+            return;
+        }
+        const sorted = [...this._records.keys()].sort();
+        const excess = sorted.length - this._maxDays;
+        for (let i = 0; i < excess; i++) {
+            this._records.delete(sorted[i]);
+        }
+    }
+    _persist() {
+        if (this._globalState) {
+            this._globalState.update(STORAGE_KEY, this.serialize());
+        }
+    }
+}
+exports.DailyStore = DailyStore;
+//# sourceMappingURL=daily-store.js.map

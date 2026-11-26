@@ -1,0 +1,11 @@
+{
+  "cli.cycle_mode": ["shift+tab"],
+  "view.review_artifact": ["ctrl+r"],
+  "view.toggle_trajectory": ["ctrl+o"],
+  "edit.open_editor": ["ctrl+g"],
+  "prompt.submit_alternate": ["alt+m"],
+  "subagent.jump_to_waiting": ["alt+j"],
+  "subagent.approve_fast": ["ctrl+k"],
+  "swarm.board": ["alt+s"],
+  "swarm.dismiss": ["alt+x"]
+}

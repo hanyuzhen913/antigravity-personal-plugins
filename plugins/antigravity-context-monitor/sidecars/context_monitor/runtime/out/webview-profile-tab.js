@@ -1,0 +1,363 @@
+"use strict";
+// ─── Profile Tab Content Builder ─────────────────────────────────────────────
+// Builds HTML for the "Profile" tab: Account info, shared model quota pools,
+// AI credits & expiry day, and collapsible plan limits / feature / team config.
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.buildProfileContent = buildProfileContent;
+exports.sortModels = sortModels;
+exports.buildModelQuotaGrid = buildModelQuotaGrid;
+exports.buildDefaultModelCard = buildDefaultModelCard;
+const account_credits_1 = require("./account-credits");
+const i18n_1 = require("./i18n");
+const monitor_overview_1 = require("./monitor-overview");
+const reset_time_1 = require("./reset-time");
+const webview_icons_1 = require("./webview-icons");
+const webview_helpers_1 = require("./webview-helpers");
+const billing_day_1 = require("./billing-day");
+const model_quota_1 = require("./model-quota");
+function formatCreditTypeLabelHtml(creditType) {
+    const key = creditType.trim().toUpperCase().replace(/^CREDIT_TYPE_/, '');
+    const labelMap = {
+        GOOGLE_ONE_AI: ['Google AI credits', 'Google AI 积分'],
+        GOOGLE_AI: ['Google AI credits', 'Google AI 积分'],
+        GOOGLE_AI_STUDIO: ['Google AI Studio credits', 'Google AI Studio 积分'],
+    };
+    const mapped = Object.hasOwn(labelMap, key) ? labelMap[key] : undefined;
+    if (mapped) {
+        return (0, webview_helpers_1.tBiHtml)(mapped[0], mapped[1]);
+    }
+    return key ? (0, webview_helpers_1.esc)(key.replace(/_/g, ' ')) : (0, webview_helpers_1.tBiHtml)('Balance', '余额');
+}
+function formatModelTagTitle(title) {
+    const known = {
+        Fast: ['Fast', '快速'],
+        New: ['New', '新'],
+        Preview: ['Preview', '预览'],
+        Beta: ['Beta', '测试'],
+        'Limited time': ['Limited time', '限时'],
+        Notice: ['Notice', '提示'],
+    };
+    const mapped = Object.hasOwn(known, title) ? known[title] : undefined;
+    return mapped
+        ? { plain: (0, i18n_1.tBi)(mapped[0], mapped[1]), html: (0, webview_helpers_1.tBiHtml)(mapped[0], mapped[1]) }
+        : { plain: title, html: (0, webview_helpers_1.esc)(title) };
+}
+function creditExpiryHtml(days) {
+    if (days === null || !Number.isFinite(days) || days < 0) {
+        return (0, webview_helpers_1.tBiHtml)('Expiry date not set', '未设置到期日');
+    }
+    if (days === 0) {
+        return (0, webview_helpers_1.tBiHtml)('Expires today', '今日到期');
+    }
+    return (0, webview_helpers_1.tBiHtml)(days === 1 ? 'Expires in 1 day' : `Expires in ${days} days`, `${days} 天后到期`);
+}
+// ─── Public API ──────────────────────────────────────────────────────────────
+/** Build the complete Profile tab HTML. */
+function buildProfileContent(userInfo, configs, billingDay, quotaSummary) {
+    if (!userInfo) {
+        return `
+            <section class="card empty">
+                <h2>${webview_icons_1.ICON.user} <span>${(0, webview_helpers_1.tBiHtml)('Profile', '个人')}</span></h2>
+                <p class="empty-desc">${(0, webview_helpers_1.tBiHtml)('Waiting for user data from LS...', '等待 LS 用户数据...')}</p>
+            </section>`;
+    }
+    const sortedConfigs = sortModels(configs, userInfo.modelSortOrder);
+    const quota = buildModelQuotaGrid(sortedConfigs, { embedded: true, quotaSummary });
+    return `
+        <div class="profile-page">
+            ${buildAccountSection(userInfo)}
+            <div class="profile-body-grid">
+                <section class="profile-quota" aria-labelledby="profile-quota-heading">
+                    <header class="profile-section-header">
+                        <h2 id="profile-quota-heading">${(0, webview_helpers_1.tBiHtml)('Model quota', '模型配额')}</h2>
+                        <button type="button" class="overview-action" data-overview-target="models"><span>${(0, webview_helpers_1.tBiHtml)('View models', '查看模型')}</span> ${webview_icons_1.ICON.externalLink}</button>
+                    </header>
+                    ${quota || `<p class="empty-msg">${(0, webview_helpers_1.tBiHtml)('Waiting for model quota data.', '等待模型配额数据。')}</p>`}
+                </section>
+                ${buildCreditSection(userInfo, billingDay)}
+            </div>
+            <details id="profile-plan-details" class="profile-technical">
+                <summary><span>${(0, webview_helpers_1.tBiHtml)('Plan limits and capabilities', '计划限制与功能配置')}</span></summary>
+                <div class="profile-technical-body">${buildLimitsSection(userInfo)}${buildFeatureAndTeamGrid(userInfo)}</div>
+            </details>
+        </div>`;
+}
+// ─── Model Sort ──────────────────────────────────────────────────────────────
+function sortModels(configs, sortOrder) {
+    if (!sortOrder || sortOrder.length === 0) {
+        return configs;
+    }
+    const orderMap = new Map(sortOrder.map((label, i) => [label, i]));
+    return [...configs].sort((a, b) => {
+        const aIdx = orderMap.get(a.label) ?? 999;
+        const bIdx = orderMap.get(b.label) ?? 999;
+        return aIdx - bIdx;
+    });
+}
+// ─── Section Builders ────────────────────────────────────────────────────────
+function buildAccountSection(userInfo) {
+    const name = userInfo.name || '';
+    const email = userInfo.email || '';
+    const maskedName = name ? `${name.charAt(0)}***` : '***';
+    const maskedEmail = email ? email.replace(/^(.{2}).*(@.*)$/, '$1****$2') : '***';
+    const plan = [...new Set([userInfo.planName, userInfo.userTierName].filter(Boolean))].join(' · ');
+    return `
+        <header class="profile-identity">
+            <div>
+                <h2>${(0, webview_helpers_1.tBiHtml)('Account', '账户')}</h2>
+                <div class="account-info">
+                    <span class="account-name" data-real="${(0, webview_helpers_1.esc)(name)}" data-masked="${(0, webview_helpers_1.esc)(maskedName)}">${(0, webview_helpers_1.esc)(maskedName)}</span>
+                    <span class="account-email" data-real="${(0, webview_helpers_1.esc)(email)}" data-masked="${(0, webview_helpers_1.esc)(maskedEmail)}">${(0, webview_helpers_1.esc)(maskedEmail)}</span>
+                </div>
+                ${plan ? `<p class="profile-plan-name">${(0, webview_helpers_1.esc)(plan)}</p>` : ''}
+            </div>
+            <button type="button" class="privacy-btn active" id="privacyToggle" aria-pressed="true">
+                ${webview_icons_1.ICON.shield}<span>${(0, webview_helpers_1.tBiHtml)('Privacy mask', '隐私遮罩')}</span>
+            </button>
+        </header>`;
+}
+function buildCreditSection(userInfo, billingDay) {
+    const day = billingDay || 0;
+    const credits = (0, account_credits_1.currentAICredits)(userInfo.availableCredits || []);
+    const readings = credits.length ? credits : [{ creditType: '', creditAmount: null }];
+    const expiryHtml = creditExpiryHtml((0, billing_day_1.getDaysUntilBillingDay)(day));
+    return `
+        <section class="profile-ai" aria-labelledby="profile-ai-heading">
+            <header class="profile-section-header">
+                <h2 id="profile-ai-heading">${(0, webview_helpers_1.tBiHtml)('AI credits', 'AI 积分')}</h2>
+                <a class="profile-activity" href="https://antigravity.google/g1-activity" target="_blank" rel="noopener noreferrer"><span>${(0, webview_helpers_1.tBiHtml)('Credit activity', '积分记录')}</span> ${webview_icons_1.ICON.externalLink}</a>
+            </header>
+            <dl class="profile-credit-balances">
+                ${readings.map(c => `<div class="profile-credit-balance">
+                    <dt>${c.creditType ? formatCreditTypeLabelHtml(c.creditType) : (0, webview_helpers_1.tBiHtml)('Balance', '余额')}</dt>
+                    <dd class="gai-value${c.creditAmount === null ? ' is-unreported' : ''}">${c.creditAmount === null ? (0, webview_helpers_1.tBiHtml)('Not reported', '未上报') : (0, webview_helpers_1.esc)((0, i18n_1.formatNumber)(c.creditAmount))}</dd>
+                </div>`).join('')}
+            </dl>
+            <label class="billing-day-label" for="profileBillingDayInput">${(0, webview_helpers_1.tBiHtml)('Monthly credits expiry day', '每月积分到期日')}</label>
+            <div class="billing-day-input-group">
+                <div class="num-spinner">
+                    <button type="button" class="num-spinner-btn decrement" aria-label="${(0, webview_helpers_1.esc)((0, i18n_1.tBi)('Decrease day', '减小日期'))}">−</button>
+                    <input type="number" id="profileBillingDayInput" class="threshold-input"
+                        data-email="${(0, webview_helpers_1.esc)(userInfo.email || '')}" value="${day}" min="0" max="31" step="1" />
+                    <button type="button" class="num-spinner-btn increment" aria-label="${(0, webview_helpers_1.esc)((0, i18n_1.tBi)('Increase day', '增大日期'))}">+</button>
+                </div>
+                <button type="button" class="action-btn" id="profileBillingDaySaveBtn"><span>${(0, webview_helpers_1.tBiHtml)('Save', '保存')}</span></button>
+            </div>
+            <p class="profile-expiry">${expiryHtml} · ${(0, webview_helpers_1.tBiHtml)('Use 0 to turn off the countdown.', '填 0 可关闭倒计时。')}</p>
+            <span id="profileBillingDayFeedback" class="threshold-feedback" role="status"></span>
+        </section>`;
+}
+function quotaEffortLabel(effort) {
+    return { low: (0, i18n_1.tBi)('Low', '低'), medium: (0, i18n_1.tBi)('Medium', '中'), high: (0, i18n_1.tBi)('High', '高'), xhigh: (0, i18n_1.tBi)('Extra High', '超高') }[effort];
+}
+function quotaEffortsHtml(efforts) {
+    return (0, webview_helpers_1.tBiHtml)(efforts.map(e => ({ low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High' })[e]).join(' · '), efforts.map(e => ({ low: '低', medium: '中', high: '高', xhigh: '超高' })[e]).join(' · '));
+}
+function quotaResetLabel(resetTime, precise = false) {
+    const countdown = (0, reset_time_1.formatResetCountdown)(resetTime);
+    const absolute = (0, reset_time_1.formatResetAbsolute)(resetTime, { includeSeconds: precise });
+    return countdown ? `${countdown} · ${absolute}` : absolute;
+}
+function quotaPercentage(fraction) {
+    return new Intl.NumberFormat((0, i18n_1.getLanguage)() === 'zh' ? 'zh-CN' : 'en-US', { maximumFractionDigits: 8 }).format(fraction * 100);
+}
+function renderDualWindowBar(groupLabel, kind, win) {
+    const labelHtml = kind === '5h' ? (0, webview_helpers_1.tBiHtml)('5-Hour', '5 小时') : (0, webview_helpers_1.tBiHtml)('Weekly', '每周');
+    const labelPlain = kind === '5h' ? (0, i18n_1.tBi)('5-Hour', '5 小时') : (0, i18n_1.tBi)('Weekly', '每周');
+    const rawFrac = win.remainingFraction;
+    const frac = typeof rawFrac === 'number' && Number.isFinite(rawFrac) && rawFrac >= 0 && rawFrac <= 1 ? rawFrac : null;
+    const pct = frac === null ? null : Number((frac * 100).toFixed(8));
+    const barTone = pct === null ? '' : pct <= 20 ? 'is-attention' : pct < 50 ? 'is-warn' : 'is-healthy';
+    const barColor = pct === null ? '' : pct <= 20 ? 'var(--ed-danger-fill)'
+        : pct < 50 ? 'var(--ed-warn-fill)' : 'var(--ed-good-fill)';
+    const pctPlain = frac === null ? (0, i18n_1.tBi)('Unknown', '未知') : (0, monitor_overview_1.formatQuotaWindowPercent)(frac);
+    const pctHtml = frac === null ? `<span class="is-unknown">${(0, webview_helpers_1.tBiHtml)('Unknown', '未知')}</span>` : (0, webview_helpers_1.esc)(pctPlain);
+    const parsedReset = win.resetTime ? Date.parse(win.resetTime) : Number.NaN;
+    const resetHtml = win.resetTime && Number.isFinite(parsedReset) && parsedReset > 0
+        ? `${(0, webview_helpers_1.tBiHtml)('Reset', '重置')} ${(0, webview_helpers_1.esc)(quotaResetLabel(win.resetTime))}`
+        : (0, webview_helpers_1.tBiHtml)('Reset time unavailable', '暂无重置时间');
+    return `
+        <div class="quota-dual-item" data-quota-window="${kind}">
+            <div class="quota-dual-head">
+                <span class="quota-dual-label">${labelHtml}</span>
+                <span class="quota-dual-pct">${pctHtml}</span>
+            </div>
+            <div class="quota-bar-wrap${pct === null ? ' is-unknown' : ''}" role="progressbar" aria-label="${(0, webview_helpers_1.esc)(`${groupLabel} ${labelPlain}`)}"
+                aria-valuemin="0" aria-valuemax="100"${pct === null ? '' : ` aria-valuenow="${pct}"`} aria-valuetext="${(0, webview_helpers_1.esc)(pctPlain)}">
+                ${pct === null ? '' : `<div class="quota-bar ${barTone}" style="width:${pct}%;background:${barColor}"></div>`}
+            </div>
+            <div class="model-card-meta"><span class="model-card-reset">${resetHtml}</span></div>
+        </div>`;
+}
+function buildModelQuotaGrid(configs, options = {}) {
+    const groups = (0, model_quota_1.groupModelQuotas)(configs, options.quotaSummary);
+    if (groups.length === 0) {
+        return '';
+    }
+    const cards = groups.map(group => {
+        const minimum = group.minimum;
+        const pct = minimum === null ? null : Number((minimum * 100).toFixed(8));
+        const barTone = pct === null ? '' : pct <= 20 ? 'is-attention' : pct < 50 ? 'is-warn' : 'is-healthy';
+        const barColor = pct === null ? '' : pct <= 20 ? 'var(--ed-danger-fill)'
+            : pct < 50 ? 'var(--ed-warn-fill)' : 'var(--ed-good-fill)';
+        const lowLabel = minimum === null ? '' : quotaPercentage(minimum);
+        const highLabel = group.maximum === null ? '' : quotaPercentage(group.maximum);
+        const percentagePlain = pct === null ? (0, i18n_1.tBi)('Unknown', '未知') : group.quotaDiffers && lowLabel !== highLabel
+            ? `${lowLabel}–${highLabel}%` : `${lowLabel}%`;
+        const percentageHtml = pct === null ? (0, webview_helpers_1.tBiHtml)('Unknown', '未知') : (0, webview_helpers_1.esc)(percentagePlain);
+        // Compare raw readings in the helper; retain a notice when a genuine
+        // difference is smaller than the precision useful in a quota card.
+        const precisionNotice = group.quotaDiffers && lowLabel === highLabel
+            ? `<p class="model-quota-notice">${(0, webview_helpers_1.tBiHtml)('Differences are below displayed precision.', '差异小于显示精度。')}</p>` : '';
+        const resetLabelHtml = group.resetDiffers ? (0, webview_helpers_1.tBiHtml)('Reset times differ', '重置时间不同')
+            : group.resetTime ? `${(0, webview_helpers_1.tBiHtml)('Reset', '重置')} ${(0, webview_helpers_1.esc)(quotaResetLabel(group.resetTime))}`
+                : (0, webview_helpers_1.tBiHtml)('Reset time unavailable', '暂无重置时间');
+        const members = group.pool ? `<ul class="model-quota-members">${group.members.map(member => {
+            const memberTag = member.tagTitle ? formatModelTagTitle(member.tagTitle) : null;
+            const memberTagCls = member.tagTitle === 'Notice' ? 'model-tag-badge tag-notice' : 'model-tag-badge';
+            const memberTagHtml = memberTag
+                ? ` <span class="${memberTagCls}" title="${(0, webview_helpers_1.esc)(memberTag.plain)}">${memberTag.html}</span>` : '';
+            return `
+            <li><span>${(0, webview_helpers_1.esc)(member.label)}${memberTagHtml}</span>${member.efforts.length
+                ? `<span class="model-card-efforts">${quotaEffortsHtml(member.efforts)}</span>` : ''}</li>`;
+        }).join('')}</ul>`
+            : group.efforts.length ? `<div class="model-card-efforts">${quotaEffortsHtml(group.efforts)}</div>` : '';
+        const notices = [];
+        if (group.quotaDiffers || group.resetDiffers) {
+            notices.push((0, webview_helpers_1.tBiHtml)('Reported values differ', '上报数值不一致'));
+        }
+        if (group.missingQuota || group.missingReset) {
+            notices.push((0, webview_helpers_1.tBiHtml)('Some quota or reset data is unavailable', '部分配额或重置数据缺失'));
+        }
+        const details = notices.length ? `
+                <p class="model-quota-notice">${notices.join(' · ')}</p>
+                <details class="model-quota-details">
+                    <summary><span>${(0, webview_helpers_1.tBiHtml)('Readings by effort', '各档位读数')}</span></summary>
+                    <ul>${group.readings.map(reading => `
+                        <li><span>${(0, webview_helpers_1.esc)(reading.effort ? `${reading.familyLabel} (${quotaEffortLabel(reading.effort)})` : reading.label)}</span>
+                            <span>${reading.remaining === null ? (0, webview_helpers_1.tBiHtml)('Unknown', '未知') : `${(0, webview_helpers_1.esc)(quotaPercentage(reading.remaining))}%`}</span>
+                            <span class="model-quota-reading-reset">${reading.resetTime
+            ? `${(0, webview_helpers_1.tBiHtml)('Reset', '重置')} ${(0, webview_helpers_1.esc)(quotaResetLabel(reading.resetTime, true))}`
+            : (0, webview_helpers_1.tBiHtml)('Reset time unavailable', '暂无重置时间')}</span></li>`).join('')}
+                    </ul>${precisionNotice}
+                </details>` : '';
+        const tag = group.tagTitle ? formatModelTagTitle(group.tagTitle) : null;
+        const tagCls = group.tagTitle === 'Notice' ? 'model-tag-badge tag-notice' : 'model-tag-badge';
+        const tagBadge = tag ? `<span class="${tagCls}" title="${(0, webview_helpers_1.esc)(tag.plain)}">${tag.html}</span>` : '';
+        const names = [...new Set(group.readings.map(reading => reading.label))].join(' · ');
+        const hasDualWindow = Boolean(group.fiveHourQuota || group.weeklyQuota);
+        const metersHtml = hasDualWindow
+            ? `<div class="quota-dual-row">
+                    ${group.fiveHourQuota ? renderDualWindowBar(group.label, '5h', group.fiveHourQuota) : ''}
+                    ${group.weeklyQuota ? renderDualWindowBar(group.label, 'weekly', group.weeklyQuota) : ''}
+                </div>`
+            : `<div class="quota-bar-wrap${pct === null ? ' is-unknown' : ''}" role="progressbar" aria-label="${(0, webview_helpers_1.esc)(`${group.label} ${(0, i18n_1.tBi)('quota remaining', '剩余配额')}`)}"
+                    aria-valuemin="0" aria-valuemax="100"${pct === null ? '' : ` aria-valuenow="${pct}"`} aria-valuetext="${(0, webview_helpers_1.esc)(percentagePlain)}">
+                    ${pct === null ? '' : `<div class="quota-bar ${barTone}" style="width:${pct}%;background:${barColor}"></div>`}
+                </div>
+                <div class="model-card-meta"><span class="model-card-reset">${resetLabelHtml}</span></div>`;
+        return `
+            <div class="model-card" data-quota-family="${(0, webview_helpers_1.esc)(group.key)}">
+                <div class="model-card-header">
+                    <span class="model-card-name">
+                        <span class="model-card-name-text" title="${(0, webview_helpers_1.esc)(names)}">${(0, webview_helpers_1.esc)(group.label)}</span>${tagBadge}
+                    </span>
+                    ${hasDualWindow ? '' : `<span class="model-card-pct${pct === null ? ' is-unknown' : ''}">${percentageHtml}</span>`}
+                </div>
+                ${members}
+                ${metersHtml}
+                ${details}
+            </div>`;
+    }).join('');
+    if (options.embedded) {
+        return `<div class="model-grid">${cards}</div>`;
+    }
+    return `
+        <section class="card model-quota-section">
+            ${options.hideHeading ? '' : `<h2>${webview_icons_1.ICON.bolt} <span>${(0, webview_helpers_1.tBiHtml)('Model Quota', '模型配额')}</span></h2>`}
+            <div class="model-grid">${cards}</div>
+        </section>`;
+}
+function buildDefaultModelCard(userInfo) {
+    if (!userInfo?.defaultModelLabel) {
+        return '';
+    }
+    return `
+        <section class="card default-model-card">
+            <h2>${webview_icons_1.ICON.bolt} <span>${(0, webview_helpers_1.tBiHtml)('Default Model', '默认模型')}</span></h2>
+            <div class="default-model"><span>${(0, webview_helpers_1.tBiHtml)('Current default', '当前默认')}:</span> <strong title="${(0, webview_helpers_1.esc)(userInfo.defaultModelLabel)}">${(0, webview_helpers_1.esc)(userInfo.defaultModelLabel)}</strong></div>
+            ${userInfo.userTierDescription
+        ? `<p class="raw-desc">${(0, webview_helpers_1.esc)(userInfo.userTierDescription)}</p>`
+        : ''}
+        </section>`;
+}
+function buildLimitsSection(userInfo) {
+    const pl = userInfo.planLimits;
+    if (!pl) {
+        return '';
+    }
+    const fmtLimit = (v) => {
+        if (typeof v !== 'number' || !Number.isFinite(v)) {
+            return '—';
+        }
+        return v === -1 ? '∞' : (0, i18n_1.formatNumber)(v);
+    };
+    const flexAmount = typeof pl.monthlyFlexCreditPurchaseAmount === 'number' && Number.isFinite(pl.monthlyFlexCreditPurchaseAmount)
+        ? `${(0, webview_helpers_1.esc)((0, i18n_1.formatNumber)(pl.monthlyFlexCreditPurchaseAmount))} ${(0, webview_helpers_1.tBiHtml)('per month', '每月')}`
+        : '—';
+    const limitCards = [
+        [(0, webview_helpers_1.tBiHtml)('Max Input Tokens', '最大输入'), (0, webview_helpers_1.esc)(fmtLimit(pl.maxNumChatInputTokens))],
+        [(0, webview_helpers_1.tBiHtml)('Premium Messages', '高级消息数'), (0, webview_helpers_1.esc)(fmtLimit(pl.maxNumPremiumChatMessages))],
+        [(0, webview_helpers_1.tBiHtml)('Custom Instructions', '自定义指令'), `${(0, webview_helpers_1.esc)(fmtLimit(pl.maxCustomChatInstructionCharacters))} ${(0, webview_helpers_1.tBiHtml)('chars', '字符')}`],
+        [(0, webview_helpers_1.tBiHtml)('Pinned Context', '固定上下文'), (0, webview_helpers_1.esc)(fmtLimit(pl.maxNumPinnedContextItems))],
+        [(0, webview_helpers_1.tBiHtml)('Local Index', '本地索引'), (0, webview_helpers_1.esc)(fmtLimit(pl.maxLocalIndexSize))],
+        [(0, webview_helpers_1.tBiHtml)('Flex Credits', 'Flex 积分'), flexAmount],
+    ];
+    const limitCardsHtml = limitCards.map(([k, v]) => `
+        <div class="profile-metric-card">
+            <span class="profile-metric-label">${k}</span>
+            <span class="profile-metric-value">${v}</span>
+        </div>`).join('');
+    return `
+        <section class="profile-tech-section">
+            <h3 class="profile-sub-heading">${webview_icons_1.ICON.shield} <span>${(0, webview_helpers_1.tBiHtml)('Plan Limits', '计划限制')}</span></h3>
+            <div class="profile-metric-grid">${limitCardsHtml}</div>
+        </section>`;
+}
+function buildFeatureAndTeamGrid(userInfo) {
+    // Feature flags
+    const allFeatures = [
+        { label: (0, webview_helpers_1.tBiHtml)('Web Search', '网页搜索'), enabled: !!userInfo.cascadeWebSearchEnabled },
+        { label: (0, webview_helpers_1.tBiHtml)('Browser', '浏览器'), enabled: !!userInfo.browserEnabled },
+        { label: (0, webview_helpers_1.tBiHtml)('Knowledge Base', '知识库'), enabled: !!userInfo.knowledgeBaseEnabled },
+        { label: (0, webview_helpers_1.tBiHtml)('Commit Msg', '提交信息'), enabled: !!userInfo.canGenerateCommitMessages },
+        { label: (0, webview_helpers_1.tBiHtml)('Auto Run', '自动执行'), enabled: !!userInfo.cascadeCanAutoRunCommands },
+        { label: (0, webview_helpers_1.tBiHtml)('Background', '后台'), enabled: !!userInfo.canAllowCascadeInBackground },
+        { label: (0, webview_helpers_1.tBiHtml)('Buy Credits', '购买积分'), enabled: !!userInfo.canBuyMoreCredits },
+        { label: (0, webview_helpers_1.tBiHtml)('Fast Autocomplete', '快速补全'), enabled: !!userInfo.hasAutocompleteFastMode },
+        { label: (0, webview_helpers_1.tBiHtml)('Sticky Premium', '锁定高级'), enabled: !!userInfo.allowStickyPremiumModels },
+        { label: (0, webview_helpers_1.tBiHtml)('Command Models', '命令模型'), enabled: !!userInfo.allowPremiumCommandModels },
+        { label: (0, webview_helpers_1.tBiHtml)('Tab Jump', 'Tab 跳转'), enabled: !!userInfo.hasTabToJump },
+        { label: (0, webview_helpers_1.tBiHtml)('Custom Icon', '自定义图标'), enabled: !!userInfo.canCustomizeAppIcon },
+    ];
+    const featureTags = allFeatures.map(f => `<span class="feature-tag${f.enabled ? ' enabled' : ''}"><span>${f.label}</span></span>`).join('');
+    // Team config
+    const tc = userInfo.teamConfig;
+    const teamTags = [
+        { label: (0, webview_helpers_1.tBiHtml)('MCP Servers', 'MCP 服务'), enabled: !!tc?.allowMcpServers },
+        { label: (0, webview_helpers_1.tBiHtml)('Auto Run Cmd', '自动执行命令'), enabled: !!tc?.allowAutoRunCommands },
+        { label: (0, webview_helpers_1.tBiHtml)('Browser Experimental', '浏览器实验'), enabled: !!tc?.allowBrowserExperimentalFeatures },
+    ].map(f => `<span class="feature-tag${f.enabled ? ' enabled' : ''}"><span>${f.label}</span></span>`).join('');
+    return `
+        <div class="profile-two-col">
+            <section class="profile-tech-section profile-panel-card">
+                <h3 class="profile-sub-heading">${webview_icons_1.ICON.bolt} <span>${(0, webview_helpers_1.tBiHtml)('Feature Flags', '功能开关')}</span></h3>
+                <div class="profile-chip-grid">${featureTags}</div>
+            </section>
+            <section class="profile-tech-section profile-panel-card">
+                <h3 class="profile-sub-heading">${webview_icons_1.ICON.shield} <span>${(0, webview_helpers_1.tBiHtml)('Team Config', '团队配置')}</span></h3>
+                <div class="profile-chip-grid">${teamTags}</div>
+            </section>
+        </div>`;
+}
+//# sourceMappingURL=webview-profile-tab.js.map

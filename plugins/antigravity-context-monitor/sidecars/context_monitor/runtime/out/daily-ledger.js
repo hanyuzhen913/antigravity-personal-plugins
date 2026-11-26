@@ -1,0 +1,1199 @@
+"use strict";
+// ─── Daily Ledger ────────────────────────────────────────────────────────────
+// Incremental GM call ledger: records every new GM call in real-time,
+// bucketed by date + account email. Does not depend on LS keeping
+// conversations in memory — once a call is recorded, it's permanent
+// until midnight rollover.
+//
+// Lifecycle:
+//   fetchAll() → getNewCallsSinceLastRecord() → ledger.recordCalls()  (real-time)
+//   quota reset → ledger.settleForQuotaReset()                        (per-pool settle)
+//   midnight   → ledger.rollover() → DailyStore                      (day-end flush)
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.DailyLedger = void 0;
+exports.normalizeUsageSurface = normalizeUsageSurface;
+exports.toLocalDateKey = toLocalDateKey;
+exports.resolveModelKeyForLedger = resolveModelKeyForLedger;
+exports.cloneSurfaceBreakdown = cloneSurfaceBreakdown;
+exports.dominantUsageSurface = dominantUsageSurface;
+const models_1 = require("./models");
+const parser_1 = require("./gm/parser");
+const pricing_store_1 = require("./pricing-store");
+const telemetry_metrics_1 = require("./telemetry-metrics");
+/** Normalize raw surface strings (e.g. 'app-sidecar', 'vscode', 'desktop') to canonical UsageSurface. */
+function normalizeUsageSurface(raw) {
+    if (!raw || typeof raw !== 'string') {
+        return 'unknown';
+    }
+    const v = raw.trim().toLowerCase();
+    if (!v) {
+        return 'unknown';
+    }
+    if (v === 'app' || v === 'app-sidecar' || v === 'desktop' || v === 'antigravity-app') {
+        return 'app';
+    }
+    if (v === 'ide' || v === 'vscode' || v === 'antigravity-ide') {
+        return 'ide';
+    }
+    if (v === 'cli' || v === 'agy-cli' || v === 'antigravity-cli') {
+        return 'cli';
+    }
+    return 'unknown';
+}
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function toLocalDateKey(date = new Date()) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
+/**
+ * Convert a dateKey like "2026-05-29" to the Unix timestamp (ms) of
+ * midnight local time on that date.
+ * Returns 0 on parse failure (caller treats 0 as "no filter").
+ */
+function dateKeyToStartOfDayMs(dateKey) {
+    const parts = dateKey.split('-');
+    if (parts.length !== 3) {
+        return 0;
+    }
+    const y = parseInt(parts[0], 10);
+    const m = parseInt(parts[1], 10) - 1;
+    const d = parseInt(parts[2], 10);
+    if (isNaN(y) || isNaN(m) || isNaN(d)) {
+        return 0;
+    }
+    return new Date(y, m, d, 0, 0, 0, 0).getTime();
+}
+function dateKeyToNextDayStartMs(dateKey) {
+    const parts = dateKey.split('-');
+    if (parts.length !== 3) {
+        return 0;
+    }
+    const y = parseInt(parts[0], 10);
+    const m = parseInt(parts[1], 10) - 1;
+    const d = parseInt(parts[2], 10);
+    if (isNaN(y) || isNaN(m) || isNaN(d)) {
+        return 0;
+    }
+    return new Date(y, m, d + 1, 0, 0, 0, 0).getTime();
+}
+/** Fallback: build a dedup key from call fields (best-effort, may collide for placeholder data). */
+function fallbackCallId(call) {
+    if (call.executionId) {
+        return call.executionId;
+    }
+    const base = (0, parser_1.buildGMArchiveKey)(call);
+    return `${base}|in:${call.inputTokens}|out:${call.outputTokens}|ssi:${call.startStepIndex}`;
+}
+/**
+ * Compute per-call estimated cost using the concrete model identity, with
+ * responseModel/display fallbacks for incomplete historical records.
+ *
+ * Deliberately uses the built-in table only. This value is persisted, and two windows
+ * can hold different custom prices (the durable store is read once at construction and
+ * has no watcher), so pricing it per-window would make the same day serialize to
+ * different numbers and flip back and forth under last-writer-wins. Custom prices are
+ * applied where the number is read instead — see the Pricing tab and
+ * `buildGMSummaryFromLedger`, which re-price from the token counts kept alongside.
+ */
+function estimateCallCost(call, dateKey) {
+    const at = call.createdAt || dateKey;
+    const fallback = (0, pricing_store_1.selectPricingModel)(call.modelDisplay, call.responseModel);
+    const pr = (0, pricing_store_1.findPricingForDate)((0, pricing_store_1.selectPricingModel)(call.model, fallback), {}, at);
+    return pr ? (0, pricing_store_1.costFromTokens)(call, pr) : 0;
+}
+/** A timestamp enrichment changes an archive key, but not the underlying call. */
+function recordedCallIdentityMatches(recordedId, entry) {
+    const nextId = entry.dedupKey || fallbackCallId(entry.call);
+    if (recordedId === nextId) {
+        return true;
+    }
+    if (entry.call.executionId) {
+        return recordedId === entry.call.executionId
+            || recordedId.endsWith(`|${encodeURIComponent(`exec:${entry.call.executionId}`)}`);
+    }
+    const archiveIdentity = (id) => {
+        const split = id.indexOf('|');
+        if (split < 0) {
+            return null;
+        }
+        try {
+            const identity = decodeURIComponent(id.slice(split + 1));
+            if (!identity.startsWith('archive|')) {
+                return null;
+            }
+            const start = identity.lastIndexOf('|created:');
+            const end = identity.indexOf('|in:', start);
+            if (start < 0 || end < 0) {
+                return null;
+            }
+            return { scope: id.slice(0, split), key: identity.slice(0, start) + identity.slice(end),
+                date: identity.slice(start + '|created:'.length, end) };
+        }
+        catch {
+            return null;
+        }
+    };
+    const before = archiveIdentity(recordedId);
+    const after = archiveIdentity(nextId);
+    return !!before && !!after && before.scope === after.scope && before.key === after.key
+        && !(0, parser_1.isValidCallTimestamp)(before.date) && (0, parser_1.isValidCallTimestamp)(after.date);
+}
+function sameAmount(left, right) {
+    return Number.isFinite(left) && Number.isFinite(right)
+        && Math.abs(left - right) <= Math.max(1e-9, Math.abs(left) * 1e-9, Math.abs(right) * 1e-9);
+}
+/**
+ * Pick the per-model key a ledger bucket is filed under.
+ *
+ * The key has to survive being written before model labels are available, because the ledger is
+ * persisted and later reads merge by key. `normalizeModelDisplayName()` echoes an unresolvable input
+ * back unchanged, so using it directly would file a raw `MODEL_PLACEHOLDER_Mxxx` string — and once
+ * that string is on disk nothing ever merges it with the same model's named row. Fall through the
+ * identifiers a call carries and take the first one that is actually a name; only use a raw
+ * identifier when the call offers nothing else.
+ */
+function resolveModelKeyForLedger(call) {
+    const isRaw = (v) => /^MODEL_[A-Z0-9_]+$/.test((v || '').trim());
+    for (const candidate of [call.modelDisplay, call.model, call.responseModel]) {
+        const clean = (candidate || '').trim();
+        if (!clean) {
+            continue;
+        }
+        const named = (0, models_1.normalizeModelDisplayName)(clean);
+        if (named && !isRaw(named)) {
+            return named;
+        }
+    }
+    // Nothing resolved to a name. Prefer the responseModel: a catalog id such as
+    // 'gemini-3.7-flash-high' at least identifies the model to a human, where a bare placeholder
+    // does not. Note this does NOT retroactively merge — rows already written under a catalog id
+    // stay under it once later rows start using the display name; it only narrows the window.
+    const response = (call.responseModel || '').trim();
+    if (response && !isRaw(response)) {
+        return response;
+    }
+    return (call.modelDisplay || call.model || call.responseModel || '').trim();
+}
+function emptyModelStats() {
+    return {
+        calls: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        thinkingTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        credits: 0,
+        estimatedCost: 0,
+        ttftSum: 0,
+        ttftCount: 0,
+        minTTFT: 0,
+        maxTTFT: 0,
+        streamingSum: 0,
+        streamingCount: 0,
+        timedOutputTokens: 0,
+        timedStreamingSeconds: 0,
+        cacheHitCalls: 0,
+    };
+}
+function addCallTelemetryToModelStats(target, ttftSeconds, streamingSeconds, outputTokens, cacheReadTokens) {
+    if (typeof ttftSeconds === 'number' && Number.isFinite(ttftSeconds) && ttftSeconds > 0) {
+        target.ttftSum = (target.ttftSum || 0) + ttftSeconds;
+        target.ttftCount = (target.ttftCount || 0) + 1;
+        target.minTTFT = target.minTTFT && target.minTTFT > 0
+            ? Math.min(target.minTTFT, ttftSeconds)
+            : ttftSeconds;
+        target.maxTTFT = Math.max(target.maxTTFT || 0, ttftSeconds);
+    }
+    if (typeof streamingSeconds === 'number' && Number.isFinite(streamingSeconds) && streamingSeconds > 0) {
+        target.streamingSum = (target.streamingSum || 0) + streamingSeconds;
+        target.streamingCount = (target.streamingCount || 0) + 1;
+        if (streamingSeconds >= telemetry_metrics_1.MIN_STREAM_SECONDS && outputTokens >= telemetry_metrics_1.MIN_OUTPUT_TOKENS_FOR_SPEED) {
+            target.timedOutputTokens = (target.timedOutputTokens || 0) + outputTokens;
+            target.timedStreamingSeconds = (target.timedStreamingSeconds || 0) + streamingSeconds;
+        }
+    }
+    if (cacheReadTokens > 0) {
+        target.cacheHitCalls = (target.cacheHitCalls || 0) + 1;
+    }
+}
+function resolveCallModelId(call, modelKey) {
+    return (0, models_1.resolveModelId)(call.model)
+        || (0, models_1.resolveModelId)(call.responseModel || '')
+        || (0, models_1.resolveModelId)(modelKey)
+        || call.model
+        || call.responseModel
+        || modelKey;
+}
+function callMatchesPool(modelKey, modelId, poolModelIds) {
+    const poolModelIdSet = new Set(poolModelIds.map(id => id.toLowerCase()));
+    if (modelId && poolModelIdSet.has(modelId.toLowerCase())) {
+        return true;
+    }
+    const resolvedId = (0, models_1.resolveModelId)(modelKey);
+    if (resolvedId && poolModelIdSet.has(resolvedId.toLowerCase())) {
+        return true;
+    }
+    for (const pid of poolModelIds) {
+        const pidDisplay = (0, models_1.normalizeModelDisplayName)(pid);
+        if (pidDisplay && pidDisplay.toLowerCase() === modelKey.toLowerCase()) {
+            return true;
+        }
+    }
+    return false;
+}
+function addRecordedCallStats(target, call) {
+    target.calls++;
+    target.inputTokens += call.inputTokens;
+    target.outputTokens += call.outputTokens;
+    target.thinkingTokens += call.thinkingTokens;
+    target.cacheReadTokens += call.cacheReadTokens;
+    target.cacheCreationTokens += call.cacheCreationTokens;
+    target.credits += call.credits;
+    target.estimatedCost += call.estimatedCost;
+    addCallTelemetryToModelStats(target, call.ttftSeconds, call.streamingSeconds, call.outputTokens, call.cacheReadTokens);
+}
+function addModelStats(target, source) {
+    target.calls += source.calls;
+    target.inputTokens += source.inputTokens;
+    target.outputTokens += source.outputTokens;
+    target.thinkingTokens += source.thinkingTokens;
+    target.cacheReadTokens += source.cacheReadTokens;
+    target.cacheCreationTokens += source.cacheCreationTokens;
+    target.credits += source.credits;
+    target.estimatedCost += source.estimatedCost;
+    target.ttftSum = (target.ttftSum || 0) + (source.ttftSum || 0);
+    target.ttftCount = (target.ttftCount || 0) + (source.ttftCount || 0);
+    const sMin = source.minTTFT || 0;
+    const tMin = target.minTTFT || 0;
+    target.minTTFT = tMin > 0 && sMin > 0 ? Math.min(tMin, sMin) : Math.max(tMin, sMin);
+    target.maxTTFT = Math.max(target.maxTTFT || 0, source.maxTTFT || 0);
+    target.streamingSum = (target.streamingSum || 0) + (source.streamingSum || 0);
+    target.streamingCount = (target.streamingCount || 0) + (source.streamingCount || 0);
+    target.timedOutputTokens = (target.timedOutputTokens || 0) + (source.timedOutputTokens || 0);
+    target.timedStreamingSeconds = (target.timedStreamingSeconds || 0) + (source.timedStreamingSeconds || 0);
+    target.cacheHitCalls = (target.cacheHitCalls || 0) + (source.cacheHitCalls || 0);
+}
+function subtractModelStatsSnapshot(total, represented) {
+    const rep = represented || emptyModelStats();
+    const ttftCount = Math.max(0, (total.ttftCount || 0) - (rep.ttftCount || 0));
+    return {
+        calls: Math.max(0, total.calls - rep.calls),
+        inputTokens: Math.max(0, total.inputTokens - rep.inputTokens),
+        outputTokens: Math.max(0, total.outputTokens - rep.outputTokens),
+        thinkingTokens: Math.max(0, total.thinkingTokens - rep.thinkingTokens),
+        cacheReadTokens: Math.max(0, total.cacheReadTokens - rep.cacheReadTokens),
+        cacheCreationTokens: Math.max(0, total.cacheCreationTokens - rep.cacheCreationTokens),
+        credits: Math.max(0, total.credits - rep.credits),
+        estimatedCost: Math.max(0, total.estimatedCost - rep.estimatedCost),
+        ttftSum: Math.max(0, (total.ttftSum || 0) - (rep.ttftSum || 0)),
+        ttftCount,
+        minTTFT: ttftCount > 0 ? (total.minTTFT || 0) : 0,
+        maxTTFT: ttftCount > 0 ? (total.maxTTFT || 0) : 0,
+        streamingSum: Math.max(0, (total.streamingSum || 0) - (rep.streamingSum || 0)),
+        streamingCount: Math.max(0, (total.streamingCount || 0) - (rep.streamingCount || 0)),
+        timedOutputTokens: Math.max(0, (total.timedOutputTokens || 0) - (rep.timedOutputTokens || 0)),
+        timedStreamingSeconds: Math.max(0, (total.timedStreamingSeconds || 0) - (rep.timedStreamingSeconds || 0)),
+        cacheHitCalls: Math.max(0, (total.cacheHitCalls || 0) - (rep.cacheHitCalls || 0)),
+    };
+}
+function hasModelStatsData(stats) {
+    return stats.calls > 0
+        || stats.inputTokens > 0
+        || stats.outputTokens > 0
+        || stats.thinkingTokens > 0
+        || stats.cacheReadTokens > 0
+        || stats.cacheCreationTokens > 0
+        || stats.credits > 0
+        || stats.estimatedCost > 0;
+}
+function parseCallCreatedAtMs(createdAt) {
+    const parsed = Date.parse(createdAt || '');
+    return Number.isNaN(parsed) ? Date.now() : parsed;
+}
+function isRecordedCallBeforeCutoff(call, cutoffMs) {
+    if (cutoffMs === undefined) {
+        return true;
+    }
+    return Number.isFinite(call.createdAtMs) ? call.createdAtMs <= cutoffMs : true;
+}
+function subtractStatsFromBucket(bucket, key, stats) {
+    bucket.totalCalls = Math.max(0, bucket.totalCalls - stats.calls);
+    bucket.totalInputTokens = Math.max(0, bucket.totalInputTokens - stats.inputTokens);
+    bucket.totalOutputTokens = Math.max(0, bucket.totalOutputTokens - stats.outputTokens);
+    bucket.totalThinkingTokens = Math.max(0, bucket.totalThinkingTokens - stats.thinkingTokens);
+    bucket.totalCacheRead = Math.max(0, bucket.totalCacheRead - stats.cacheReadTokens);
+    bucket.totalCacheCreation = Math.max(0, bucket.totalCacheCreation - stats.cacheCreationTokens);
+    bucket.totalCredits = Math.max(0, bucket.totalCredits - stats.credits);
+    bucket.totalEstimatedCost = Math.max(0, bucket.totalEstimatedCost - stats.estimatedCost);
+    const activeStats = bucket.modelStats[key];
+    if (!activeStats) {
+        return;
+    }
+    activeStats.calls = Math.max(0, activeStats.calls - stats.calls);
+    activeStats.inputTokens = Math.max(0, activeStats.inputTokens - stats.inputTokens);
+    activeStats.outputTokens = Math.max(0, activeStats.outputTokens - stats.outputTokens);
+    activeStats.thinkingTokens = Math.max(0, activeStats.thinkingTokens - stats.thinkingTokens);
+    activeStats.cacheReadTokens = Math.max(0, activeStats.cacheReadTokens - stats.cacheReadTokens);
+    activeStats.cacheCreationTokens = Math.max(0, activeStats.cacheCreationTokens - stats.cacheCreationTokens);
+    activeStats.credits = Math.max(0, activeStats.credits - stats.credits);
+    activeStats.estimatedCost = Math.max(0, activeStats.estimatedCost - stats.estimatedCost);
+    if (activeStats.ttftSum !== undefined || stats.ttftSum) {
+        activeStats.ttftSum = Math.max(0, (activeStats.ttftSum || 0) - (stats.ttftSum || 0));
+    }
+    if (activeStats.ttftCount !== undefined || stats.ttftCount) {
+        activeStats.ttftCount = Math.max(0, (activeStats.ttftCount || 0) - (stats.ttftCount || 0));
+    }
+    if (activeStats.streamingSum !== undefined || stats.streamingSum) {
+        activeStats.streamingSum = Math.max(0, (activeStats.streamingSum || 0) - (stats.streamingSum || 0));
+    }
+    if (activeStats.streamingCount !== undefined || stats.streamingCount) {
+        activeStats.streamingCount = Math.max(0, (activeStats.streamingCount || 0) - (stats.streamingCount || 0));
+    }
+    if (activeStats.timedOutputTokens !== undefined || stats.timedOutputTokens) {
+        activeStats.timedOutputTokens = Math.max(0, (activeStats.timedOutputTokens || 0) - (stats.timedOutputTokens || 0));
+    }
+    if (activeStats.timedStreamingSeconds !== undefined || stats.timedStreamingSeconds) {
+        activeStats.timedStreamingSeconds = Math.max(0, (activeStats.timedStreamingSeconds || 0) - (stats.timedStreamingSeconds || 0));
+    }
+    if (activeStats.cacheHitCalls !== undefined || stats.cacheHitCalls) {
+        activeStats.cacheHitCalls = Math.max(0, (activeStats.cacheHitCalls || 0) - (stats.cacheHitCalls || 0));
+    }
+    if (activeStats.calls === 0) {
+        delete bucket.modelStats[key];
+    }
+    else if ((activeStats.ttftCount || 0) === 0) {
+        activeStats.minTTFT = 0;
+        activeStats.maxTTFT = 0;
+    }
+    else if (Array.isArray(bucket.recordedCalls)) {
+        const remainingTtfts = bucket.recordedCalls
+            .filter(c => c.modelKey === key && typeof c.ttftSeconds === 'number' && c.ttftSeconds > 0)
+            .map(c => c.ttftSeconds);
+        if (remainingTtfts.length > 0) {
+            activeStats.minTTFT = Math.min(...remainingTtfts);
+            activeStats.maxTTFT = Math.max(...remainingTtfts);
+        }
+    }
+}
+function emptySurfaceStats() {
+    return {
+        calls: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        thinkingTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        credits: 0,
+        estimatedCost: 0,
+    };
+}
+function addSurfaceStats(target, source) {
+    target.calls += source.calls;
+    target.inputTokens += source.inputTokens;
+    target.outputTokens += source.outputTokens;
+    target.thinkingTokens += source.thinkingTokens;
+    target.cacheReadTokens += source.cacheReadTokens;
+    target.cacheCreationTokens += source.cacheCreationTokens;
+    target.credits += source.credits;
+    target.estimatedCost += source.estimatedCost;
+}
+function subtractSurfaceStats(target, source) {
+    target.calls = Math.max(0, target.calls - source.calls);
+    target.inputTokens = Math.max(0, target.inputTokens - source.inputTokens);
+    target.outputTokens = Math.max(0, target.outputTokens - source.outputTokens);
+    target.thinkingTokens = Math.max(0, target.thinkingTokens - source.thinkingTokens);
+    target.cacheReadTokens = Math.max(0, target.cacheReadTokens - source.cacheReadTokens);
+    target.cacheCreationTokens = Math.max(0, target.cacheCreationTokens - source.cacheCreationTokens);
+    target.credits = Math.max(0, target.credits - source.credits);
+    target.estimatedCost = Math.max(0, target.estimatedCost - source.estimatedCost);
+}
+function hasSurfaceStatsData(stats) {
+    return stats.calls > 0
+        || stats.inputTokens > 0
+        || stats.outputTokens > 0
+        || stats.thinkingTokens > 0
+        || stats.cacheReadTokens > 0
+        || stats.cacheCreationTokens > 0
+        || stats.credits > 0
+        || stats.estimatedCost > 0;
+}
+function cloneSurfaceBreakdown(breakdown) {
+    if (!breakdown || typeof breakdown !== 'object') {
+        return undefined;
+    }
+    const out = {};
+    let count = 0;
+    for (const [key, val] of Object.entries(breakdown)) {
+        if (!val || typeof val !== 'object') {
+            continue;
+        }
+        const surf = normalizeUsageSurface(key);
+        const existing = out[surf] || emptySurfaceStats();
+        addSurfaceStats(existing, {
+            calls: Number(val.calls) || 0,
+            inputTokens: Number(val.inputTokens) || 0,
+            outputTokens: Number(val.outputTokens) || 0,
+            thinkingTokens: Number(val.thinkingTokens) || 0,
+            cacheReadTokens: Number(val.cacheReadTokens) || 0,
+            cacheCreationTokens: Number(val.cacheCreationTokens) || 0,
+            credits: Number(val.credits) || 0,
+            estimatedCost: Number(val.estimatedCost) || 0,
+        });
+        if (hasSurfaceStatsData(existing)) {
+            out[surf] = existing;
+            count++;
+        }
+    }
+    return count > 0 ? out : undefined;
+}
+function dominantUsageSurface(breakdown, fallback) {
+    if (breakdown) {
+        let best;
+        let bestCalls = -1;
+        for (const [k, v] of Object.entries(breakdown)) {
+            const surf = normalizeUsageSurface(k);
+            if (surf === 'unknown' || !v || !hasSurfaceStatsData(v)) {
+                continue;
+            }
+            if (v.calls > bestCalls) {
+                bestCalls = v.calls;
+                best = surf;
+            }
+        }
+        if (best) {
+            return best;
+        }
+    }
+    return fallback && fallback !== 'unknown' ? fallback : undefined;
+}
+function emptyBucket(email) {
+    return {
+        accountEmail: email,
+        totalCalls: 0,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalThinkingTokens: 0,
+        totalCacheRead: 0,
+        totalCacheCreation: 0,
+        totalCredits: 0,
+        totalEstimatedCost: 0,
+        modelStats: {},
+        recordedCallIds: [],
+        recordedCalls: [],
+    };
+}
+// ─── DailyLedger Class ──────────────────────────────────────────────────────
+class DailyLedger {
+    _dateKey;
+    _defaultSurface;
+    /** Per-account active buckets (key = accountEmail or '' for unknown) */
+    _accounts = new Map();
+    /** Settled entries from quota resets (waiting for midnight flush) */
+    _settled = [];
+    /** Fast lookup set for deduplication (union of all bucket recordedCallIds) */
+    _allRecordedIds = new Set();
+    constructor(dateKey, surface) {
+        this._dateKey = dateKey || toLocalDateKey();
+        const normalized = normalizeUsageSurface(surface);
+        if (normalized !== 'unknown') {
+            this._defaultSurface = normalized;
+        }
+    }
+    /** Current date key */
+    get dateKey() { return this._dateKey; }
+    /** Default surface tag applied to calls without an explicit per-call surface */
+    get surface() { return this._defaultSurface || 'unknown'; }
+    /** Configure default surface tag ('app' | 'ide' | 'cli' | 'unknown') */
+    setSurface(surface) {
+        const normalized = normalizeUsageSurface(surface);
+        this._defaultSurface = normalized === 'unknown' ? undefined : normalized;
+    }
+    /**
+     * Normalize an empty ledger whose date no longer matches the local day.
+     * Data-bearing ledgers must wait for performDailyArchival() to rollover.
+     */
+    normalizeIfStaleEmpty(todayKey = toLocalDateKey()) {
+        if (this._dateKey === todayKey || this.hasData) {
+            return false;
+        }
+        this._resetForNewDay(todayKey);
+        return true;
+    }
+    /**
+     * Clear recorded dedup IDs that belong to a specific conversation.
+     * Called when a conversation is reverted — the old indices are invalidated
+     * and new calls at the same indices must be accepted.
+     * Does NOT reduce call counts (those represent actual API usage).
+     */
+    clearRecordedIdsForConversation(cascadeId) {
+        const prefix = cascadeId + ':';
+        const isLegacyIndexOnlyId = (id) => {
+            if (!id.startsWith(prefix)) {
+                return false;
+            }
+            return /^\d+$/.test(id.slice(prefix.length));
+        };
+        const toRemove = [];
+        for (const id of this._allRecordedIds) {
+            if (isLegacyIndexOnlyId(id)) {
+                toRemove.push(id);
+            }
+        }
+        for (const id of toRemove) {
+            this._allRecordedIds.delete(id);
+        }
+        // Also clean legacy per-account bucket recordedCallIds
+        for (const bucket of this._accounts.values()) {
+            bucket.recordedCallIds = bucket.recordedCallIds.filter(id => !isLegacyIndexOnlyId(id));
+        }
+    }
+    /**
+     * Check if a specific pool (by modelIds + email) has already been settled.
+     * Used by proactive settlement to avoid duplicate settlements.
+     */
+    isPoolSettled(modelIds, email, cutoffTime) {
+        const querySet = new Set(modelIds.map(id => id.toLowerCase()));
+        const cutoffMs = typeof cutoffTime === 'number' && !Number.isNaN(cutoffTime)
+            ? cutoffTime
+            : undefined;
+        for (const entry of this._settled) {
+            const matchEmail = !email || entry.accountEmail === email;
+            if (!matchEmail) {
+                continue;
+            }
+            // Compare by poolModelIds (raw model IDs), not modelCalls (display names)
+            const overlap = (entry.poolModelIds || []).some(pid => querySet.has(pid.toLowerCase()));
+            if (!overlap) {
+                continue;
+            }
+            if (cutoffMs === undefined) {
+                return true;
+            }
+            if (typeof entry.settledCutoffTime === 'number'
+                && entry.settledCutoffTime >= cutoffMs) {
+                return true;
+            }
+        }
+        return false;
+    }
+    /**
+     * Check if the active bucket for a given email has any recorded calls
+     * for models in the specified pool. Used to detect real usage even when
+     * the account snapshot's `hasUsage` flag is stale.
+     */
+    hasActiveCallsForPool(poolModelIds, email) {
+        const acctEmail = email || '';
+        const bucket = this._accounts.get(acctEmail);
+        if (!bucket || bucket.totalCalls === 0) {
+            return false;
+        }
+        const poolIdSet = new Set(poolModelIds.map(id => id.toLowerCase()));
+        for (const modelKey of Object.keys(bucket.modelStats)) {
+            const resolvedId = (0, models_1.resolveModelId)(modelKey);
+            if (resolvedId && poolIdSet.has(resolvedId.toLowerCase())) {
+                return true;
+            }
+            // Fallback: display name match
+            for (const pid of poolModelIds) {
+                const pidDisplay = (0, models_1.normalizeModelDisplayName)(pid);
+                if (pidDisplay && pidDisplay.toLowerCase() === modelKey.toLowerCase()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    /**
+     * Record a batch of new GM calls into the ledger.
+     * Each entry carries a `dedupKey` (provided by the tracker) for reliable dedup.
+     * @returns number of newly recorded calls
+     */
+    recordCalls(entries, defaultSurface) {
+        let added = 0;
+        const todayKey = toLocalDateKey();
+        const fallbackSurface = normalizeUsageSurface(defaultSurface ?? this._defaultSurface);
+        // If the date has rolled over, data-bearing ledgers must wait for
+        // performDailyArchival() to rollover before recording for the new day.
+        // Empty stale ledgers have nothing to flush, so normalize and continue.
+        if (todayKey !== this._dateKey) {
+            if (!this.normalizeIfStaleEmpty(todayKey)) {
+                return 0;
+            }
+        }
+        // Timestamp gate: compute midnight of dateKey's local day.
+        // Calls with createdAt before this threshold are old history
+        // (e.g. from loading a previous conversation) and must be rejected.
+        const dayStartMs = dateKeyToStartOfDayMs(this._dateKey);
+        const nextDayStartMs = dateKeyToNextDayStartMs(this._dateKey);
+        for (const entry of entries) {
+            const call = entry.call;
+            // Reject calls outside the ledger day's local bounds.
+            // This prevents both old history and future-day calls from polluting
+            // the current bucket when conversations are reloaded across midnight.
+            if (dayStartMs > 0 && call.createdAt) {
+                const callMs = Date.parse(call.createdAt);
+                if (!isNaN(callMs) && (callMs < dayStartMs || (nextDayStartMs > 0 && callMs >= nextDayStartMs))) {
+                    continue;
+                }
+            }
+            const id = entry.dedupKey || fallbackCallId(call);
+            if (this._allRecordedIds.has(id)) {
+                continue;
+            }
+            const email = call.accountEmail || '';
+            let bucket = this._accounts.get(email);
+            if (!bucket) {
+                bucket = emptyBucket(email);
+                this._accounts.set(email, bucket);
+            }
+            const callSurface = normalizeUsageSurface(entry.surface ?? call.surface ?? fallbackSurface);
+            // If this bucket previously accumulated untagged calls and now receives a tagged call,
+            // seed surfaceBreakdown with the prior untagged totals so per-surface sums match bucket totals.
+            if (callSurface !== 'unknown' && !bucket.surfaceBreakdown && bucket.totalCalls > 0) {
+                const priorSurface = normalizeUsageSurface(bucket.surface);
+                bucket.surfaceBreakdown = {
+                    [priorSurface]: {
+                        calls: bucket.totalCalls,
+                        inputTokens: bucket.totalInputTokens,
+                        outputTokens: bucket.totalOutputTokens,
+                        thinkingTokens: bucket.totalThinkingTokens,
+                        cacheReadTokens: bucket.totalCacheRead,
+                        cacheCreationTokens: bucket.totalCacheCreation,
+                        credits: bucket.totalCredits,
+                        estimatedCost: bucket.totalEstimatedCost,
+                    },
+                };
+            }
+            // Accumulate totals
+            bucket.totalCalls++;
+            bucket.totalInputTokens += call.inputTokens;
+            bucket.totalOutputTokens += call.outputTokens;
+            bucket.totalThinkingTokens += call.thinkingTokens;
+            bucket.totalCacheRead += call.cacheReadTokens;
+            bucket.totalCacheCreation += call.cacheCreationTokens;
+            bucket.totalCredits += call.credits;
+            const cost = estimateCallCost(call, this._dateKey);
+            bucket.totalEstimatedCost += cost;
+            if (callSurface !== 'unknown' || bucket.surfaceBreakdown) {
+                if (!bucket.surfaceBreakdown) {
+                    bucket.surfaceBreakdown = {};
+                }
+                const sStats = bucket.surfaceBreakdown[callSurface] || emptySurfaceStats();
+                addSurfaceStats(sStats, {
+                    calls: 1,
+                    inputTokens: call.inputTokens,
+                    outputTokens: call.outputTokens,
+                    thinkingTokens: call.thinkingTokens,
+                    cacheReadTokens: call.cacheReadTokens,
+                    cacheCreationTokens: call.cacheCreationTokens,
+                    credits: call.credits,
+                    estimatedCost: cost,
+                });
+                bucket.surfaceBreakdown[callSurface] = sStats;
+                const dominant = dominantUsageSurface(bucket.surfaceBreakdown, callSurface);
+                if (dominant) {
+                    bucket.surface = dominant;
+                }
+            }
+            // Per-model breakdown.
+            // normalizeModelDisplayName() returns its input UNCHANGED when it cannot resolve a name,
+            // and that return value is truthy — so the `||` chain below never fires and a raw
+            // "MODEL_PLACEHOLDER_M298" would become a persisted ledger key. That matters because the
+            // ledger is written before the language server is ever contacted (startup archival) and
+            // again on every poll before the LS block, so any model the registry does not yet know
+            // gets an orphan row that never merges with its named row once the labels arrive.
+            // Prefer any human-readable form we have before falling back to the raw identifier.
+            const modelKey = resolveModelKeyForLedger(call);
+            let ms = bucket.modelStats[modelKey];
+            if (!ms) {
+                ms = emptyModelStats();
+                bucket.modelStats[modelKey] = ms;
+            }
+            ms.calls++;
+            ms.inputTokens += call.inputTokens;
+            ms.outputTokens += call.outputTokens;
+            ms.thinkingTokens += call.thinkingTokens;
+            ms.cacheReadTokens += call.cacheReadTokens;
+            ms.cacheCreationTokens += call.cacheCreationTokens;
+            ms.credits += call.credits;
+            ms.estimatedCost += cost;
+            addCallTelemetryToModelStats(ms, call.ttftSeconds, call.streamingSeconds, call.outputTokens, call.cacheReadTokens);
+            // Mark as recorded
+            bucket.recordedCallIds.push(id);
+            const createdAtMs = parseCallCreatedAtMs(call.createdAt);
+            const recordedCall = {
+                callId: id,
+                createdAt: call.createdAt || '',
+                createdAtMs,
+                modelId: resolveCallModelId(call, modelKey),
+                modelKey,
+                inputTokens: call.inputTokens,
+                outputTokens: call.outputTokens,
+                thinkingTokens: call.thinkingTokens,
+                cacheReadTokens: call.cacheReadTokens,
+                cacheCreationTokens: call.cacheCreationTokens,
+                credits: call.credits,
+                estimatedCost: cost,
+            };
+            if (typeof call.ttftSeconds === 'number' && Number.isFinite(call.ttftSeconds) && call.ttftSeconds > 0) {
+                recordedCall.ttftSeconds = call.ttftSeconds;
+            }
+            if (typeof call.streamingSeconds === 'number' && Number.isFinite(call.streamingSeconds) && call.streamingSeconds > 0) {
+                recordedCall.streamingSeconds = call.streamingSeconds;
+            }
+            if (callSurface !== 'unknown') {
+                recordedCall.surface = callSurface;
+            }
+            bucket.recordedCalls.push(recordedCall);
+            this._allRecordedIds.add(id);
+            added++;
+        }
+        return added;
+    }
+    /**
+     * Upgrade metadata/cost gaps for already-recorded active calls, without adding
+     * tokens or call counts. GM dedup correctly suppresses these calls as "new",
+     * so a separate pass is required when a later version learns their timestamp
+     * or official price. Positive historical costs are never rewritten.
+     */
+    reconcileRecordedCalls(entries) {
+        let changed = 0;
+        const start = dateKeyToStartOfDayMs(this._dateKey);
+        const end = dateKeyToNextDayStartMs(this._dateKey);
+        const indexes = new Map();
+        const tokenFields = ['inputTokens', 'outputTokens', 'thinkingTokens', 'cacheReadTokens', 'cacheCreationTokens'];
+        for (const entry of entries) {
+            const call = entry.call;
+            if (!(0, parser_1.isValidCallTimestamp)(call.createdAt)) {
+                continue;
+            }
+            const callTime = Date.parse(call.createdAt);
+            if ((start > 0 && callTime < start) || (end > 0 && callTime >= end)) {
+                continue;
+            }
+            const bucket = this._accounts.get(call.accountEmail || '');
+            if (!bucket) {
+                continue;
+            }
+            let index = indexes.get(bucket);
+            if (!index) {
+                index = new Map();
+                for (const recorded of bucket.recordedCalls || []) {
+                    const matches = index.get(recorded.callId) || [];
+                    matches.push(recorded);
+                    index.set(recorded.callId, matches);
+                }
+                indexes.set(bucket, index);
+            }
+            const id = entry.dedupKey || fallbackCallId(call);
+            const matches = index.get(id)
+                || bucket.recordedCalls.filter(recorded => recordedCallIdentityMatches(recorded.callId, entry));
+            // Never guess which of several historical records a refreshed call belongs to.
+            if (matches.length !== 1) {
+                continue;
+            }
+            const recorded = matches[0];
+            const modelId = resolveCallModelId(call, resolveModelKeyForLedger(call));
+            if (((0, models_1.resolveModelId)(recorded.modelId) || recorded.modelId) !== modelId
+                || !tokenFields.every(field => recorded[field] === call[field])) {
+                continue;
+            }
+            if ((0, parser_1.isValidCallTimestamp)(recorded.createdAt) && Date.parse(recorded.createdAt) !== callTime) {
+                continue;
+            }
+            let updated = false;
+            if (!(0, parser_1.isValidCallTimestamp)(recorded.createdAt)) {
+                recorded.createdAt = call.createdAt;
+                recorded.createdAtMs = callTime;
+                updated = true;
+            }
+            if ((recorded.estimatedCost === 0 || recorded.estimatedCost === undefined)
+                && Object.prototype.hasOwnProperty.call(bucket.modelStats, recorded.modelKey)) {
+                const stats = bucket.modelStats[recorded.modelKey];
+                const modelCalls = bucket.recordedCalls.filter(item => item.modelKey === recorded.modelKey);
+                const representedCost = modelCalls.reduce((sum, item) => sum + (item.estimatedCost || 0), 0);
+                const bucketCost = Object.values(bucket.modelStats).reduce((sum, item) => sum + item.estimatedCost, 0);
+                // An unexplained positive aggregate might already include the
+                // missing per-call amount. Only add a gap when totals reconcile.
+                const fullyRepresented = modelCalls.length === stats.calls
+                    && tokenFields.every(field => modelCalls.reduce((sum, item) => sum + item[field], 0) === stats[field])
+                    && sameAmount(stats.estimatedCost, representedCost)
+                    && sameAmount(bucket.totalEstimatedCost, bucketCost);
+                if (fullyRepresented) {
+                    const price = (0, pricing_store_1.findPricingForDate)(recorded.modelId || recorded.modelKey, {}, recorded.createdAt);
+                    const cost = price ? (0, pricing_store_1.costFromTokens)(recorded, price) : 0;
+                    if (Number.isFinite(cost) && cost > 0) {
+                        recorded.estimatedCost = cost;
+                        stats.estimatedCost += cost;
+                        bucket.totalEstimatedCost += cost;
+                        if (bucket.surfaceBreakdown) {
+                            const surf = normalizeUsageSurface(recorded.surface ?? bucket.surface);
+                            if (bucket.surfaceBreakdown[surf]) {
+                                bucket.surfaceBreakdown[surf].estimatedCost += cost;
+                            }
+                        }
+                        updated = true;
+                    }
+                }
+            }
+            if (updated) {
+                changed++;
+            }
+        }
+        return changed;
+    }
+    /**
+     * Settle (freeze) data for a specific quota pool after reset.
+     * Moves matching model data from active bucket to a settled entry.
+     * The settled data stays until midnight rollover.
+     *
+     * @param poolModelIds Model IDs in the reset pool (e.g. ['MODEL_PLACEHOLDER_M16', ...])
+     * @param accountEmail Account email to settle
+     * @param cutoffTime Optional reset boundary. Only calls created at or before
+     *                   this time are settled; later calls remain active.
+     * @returns the settled entry, or null if no matching data
+     */
+    settleForQuotaReset(poolModelIds, accountEmail, cutoffTime) {
+        const email = accountEmail || '';
+        const bucket = this._accounts.get(email);
+        if (!bucket || bucket.totalCalls === 0) {
+            return null;
+        }
+        const cutoffMs = typeof cutoffTime === 'number' && !Number.isNaN(cutoffTime)
+            ? cutoffTime
+            : undefined;
+        const settledStatsByModel = {};
+        const representedStatsByModel = {};
+        const settledSurfaceBreakdown = {};
+        const hasSurfaceTracking = Boolean(bucket.surfaceBreakdown || bucket.surface);
+        const recordedCalls = Array.isArray(bucket.recordedCalls) ? bucket.recordedCalls : [];
+        const remainingCalls = [];
+        for (const call of recordedCalls) {
+            const matches = callMatchesPool(call.modelKey, call.modelId, poolModelIds);
+            if (matches) {
+                const represented = representedStatsByModel[call.modelKey] || emptyModelStats();
+                addRecordedCallStats(represented, call);
+                representedStatsByModel[call.modelKey] = represented;
+            }
+            if (!matches || !isRecordedCallBeforeCutoff(call, cutoffMs)) {
+                remainingCalls.push(call);
+                continue;
+            }
+            const stats = settledStatsByModel[call.modelKey] || emptyModelStats();
+            addRecordedCallStats(stats, call);
+            settledStatsByModel[call.modelKey] = stats;
+            if (hasSurfaceTracking || call.surface) {
+                const surf = normalizeUsageSurface(call.surface ?? bucket.surface);
+                const sStats = settledSurfaceBreakdown[surf] || emptySurfaceStats();
+                addSurfaceStats(sStats, {
+                    calls: 1,
+                    inputTokens: call.inputTokens,
+                    outputTokens: call.outputTokens,
+                    thinkingTokens: call.thinkingTokens,
+                    cacheReadTokens: call.cacheReadTokens,
+                    cacheCreationTokens: call.cacheCreationTokens,
+                    credits: call.credits,
+                    estimatedCost: call.estimatedCost,
+                });
+                settledSurfaceBreakdown[surf] = sStats;
+            }
+        }
+        bucket.recordedCalls = remainingCalls;
+        for (const [modelKey, ms] of Object.entries(bucket.modelStats)) {
+            if (!callMatchesPool(modelKey, (0, models_1.resolveModelId)(modelKey), poolModelIds)) {
+                continue;
+            }
+            const unrepresented = subtractModelStatsSnapshot(ms, representedStatsByModel[modelKey]);
+            if (hasModelStatsData(unrepresented)) {
+                const stats = settledStatsByModel[modelKey] || emptyModelStats();
+                addModelStats(stats, unrepresented);
+                settledStatsByModel[modelKey] = stats;
+                if (hasSurfaceTracking) {
+                    const fallbackSurf = normalizeUsageSurface(bucket.surface);
+                    const sStats = settledSurfaceBreakdown[fallbackSurf] || emptySurfaceStats();
+                    addSurfaceStats(sStats, {
+                        calls: unrepresented.calls,
+                        inputTokens: unrepresented.inputTokens,
+                        outputTokens: unrepresented.outputTokens,
+                        thinkingTokens: unrepresented.thinkingTokens,
+                        cacheReadTokens: unrepresented.cacheReadTokens,
+                        cacheCreationTokens: unrepresented.cacheCreationTokens,
+                        credits: unrepresented.credits,
+                        estimatedCost: unrepresented.estimatedCost,
+                    });
+                    settledSurfaceBreakdown[fallbackSurf] = sStats;
+                }
+            }
+        }
+        const matchingModelKeys = Object.keys(settledStatsByModel);
+        if (matchingModelKeys.length === 0) {
+            return null;
+        }
+        let totalCalls = 0;
+        let totalIn = 0, totalOut = 0, totalThinking = 0, totalCache = 0, totalCacheCreation = 0;
+        let totalCredits = 0, totalCost = 0;
+        const modelCalls = {};
+        const modelTelemetry = {};
+        for (const key of matchingModelKeys) {
+            const ms = settledStatsByModel[key];
+            if (!ms) {
+                continue;
+            }
+            totalCalls += ms.calls;
+            totalIn += ms.inputTokens;
+            totalOut += ms.outputTokens;
+            totalThinking += ms.thinkingTokens;
+            totalCache += ms.cacheReadTokens;
+            totalCacheCreation += ms.cacheCreationTokens;
+            totalCredits += ms.credits;
+            totalCost += ms.estimatedCost;
+            modelCalls[key] = ms.calls;
+            if ((ms.ttftCount || 0) > 0 || (ms.streamingCount || 0) > 0
+                || (ms.timedStreamingSeconds || 0) > 0 || (ms.cacheHitCalls || 0) > 0) {
+                modelTelemetry[key] = {
+                    ttftSum: ms.ttftSum || 0,
+                    ttftCount: ms.ttftCount || 0,
+                    ...(ms.minTTFT && ms.minTTFT > 0 ? { minTTFT: ms.minTTFT } : {}),
+                    ...(ms.maxTTFT && ms.maxTTFT > 0 ? { maxTTFT: ms.maxTTFT } : {}),
+                    streamingSum: ms.streamingSum || 0,
+                    streamingCount: ms.streamingCount || 0,
+                    timedOutputTokens: ms.timedOutputTokens || 0,
+                    timedStreamingSeconds: ms.timedStreamingSeconds || 0,
+                    cacheHitCalls: ms.cacheHitCalls || 0,
+                };
+            }
+            subtractStatsFromBucket(bucket, key, ms);
+        }
+        if (bucket.surfaceBreakdown) {
+            for (const [surfKey, sStats] of Object.entries(settledSurfaceBreakdown)) {
+                const surf = normalizeUsageSurface(surfKey);
+                const activeSurf = bucket.surfaceBreakdown[surf];
+                if (activeSurf && sStats) {
+                    subtractSurfaceStats(activeSurf, sStats);
+                    if (!hasSurfaceStatsData(activeSurf)) {
+                        delete bucket.surfaceBreakdown[surf];
+                    }
+                }
+            }
+            if (Object.keys(bucket.surfaceBreakdown).length === 0) {
+                delete bucket.surfaceBreakdown;
+            }
+        }
+        const clonedSettledBreakdown = cloneSurfaceBreakdown(settledSurfaceBreakdown);
+        const settledDominantSurface = dominantUsageSurface(clonedSettledBreakdown, bucket.surface);
+        const entry = {
+            settledAt: new Date().toISOString(),
+            accountEmail: email,
+            poolModelIds,
+            poolModelLabels: matchingModelKeys,
+            totalCalls,
+            totalInputTokens: totalIn,
+            totalOutputTokens: totalOut,
+            totalThinkingTokens: totalThinking,
+            totalCacheRead: totalCache,
+            totalCacheCreation,
+            totalCredits,
+            totalEstimatedCost: totalCost,
+            settledCutoffTime: cutoffMs,
+            modelCalls,
+            ...(Object.keys(modelTelemetry).length > 0 ? { modelTelemetry } : {}),
+            ...(settledDominantSurface ? { surface: settledDominantSurface } : {}),
+            ...(clonedSettledBreakdown ? { surfaceBreakdown: clonedSettledBreakdown } : {}),
+        };
+        this._settled.push(entry);
+        return entry;
+    }
+    /**
+     * Non-destructive snapshot of the current ledger day (active + settled) for
+     * live Calendar rendering and diagnostics without resetting state.
+     */
+    getLiveDaySnapshot(dateKeyOverride) {
+        const dateKey = dateKeyOverride || this._dateKey;
+        const accounts = {};
+        for (const [email, bucket] of this._accounts) {
+            const clonedBreakdown = cloneSurfaceBreakdown(bucket.surfaceBreakdown);
+            accounts[email] = {
+                ...bucket,
+                modelStats: Object.fromEntries(Object.entries(bucket.modelStats || {}).map(([k, v]) => [k, { ...v }])),
+                recordedCallIds: [...bucket.recordedCallIds],
+                recordedCalls: bucket.recordedCalls.map(c => ({ ...c })),
+                ...(clonedBreakdown ? { surfaceBreakdown: clonedBreakdown } : {}),
+            };
+        }
+        return {
+            dateKey,
+            accounts,
+            settled: this._settled.map(s => {
+                const clonedBreakdown = cloneSurfaceBreakdown(s.surfaceBreakdown);
+                return {
+                    ...s,
+                    poolModelIds: [...(s.poolModelIds || [])],
+                    poolModelLabels: [...(s.poolModelLabels || [])],
+                    modelCalls: { ...(s.modelCalls || {}) },
+                    ...(s.modelTelemetry ? {
+                        modelTelemetry: Object.fromEntries(Object.entries(s.modelTelemetry).map(([k, v]) => [k, { ...v }])),
+                    } : {}),
+                    ...(clonedBreakdown ? { surfaceBreakdown: clonedBreakdown } : {}),
+                };
+            }),
+        };
+    }
+    /**
+     * Midnight rollover: return all data for the completed day, then reset.
+     * Returns combined active + settled data for the day.
+     */
+    rollover(archiveDateKey) {
+        const result = this.getLiveDaySnapshot(archiveDateKey || this._dateKey);
+        // Reset for new day
+        this._resetForNewDay(toLocalDateKey());
+        return result;
+    }
+    /** Get active (unsettled) data for all accounts */
+    getTodayActive() {
+        return [...this._accounts.values()].filter(b => b.totalCalls > 0);
+    }
+    /** Get active data for a specific account */
+    getAccountActive(email) {
+        return this._accounts.get(email) || null;
+    }
+    /** Get settled entries (from quota resets, waiting for midnight flush) */
+    getSettledEntries() {
+        return [...this._settled];
+    }
+    /** Get combined totals (active + settled) for today */
+    getTodayTotals() {
+        let totalCalls = 0;
+        let totalCost = 0;
+        for (const bucket of this._accounts.values()) {
+            totalCalls += bucket.totalCalls;
+            totalCost += bucket.totalEstimatedCost;
+        }
+        for (const entry of this._settled) {
+            totalCalls += entry.totalCalls;
+            totalCost += entry.totalEstimatedCost;
+        }
+        return { totalCalls, totalCost };
+    }
+    /** Get combined additive token, call, credit, and cost totals (active + settled) for today */
+    getTodayDetailedTotals() {
+        let totalCalls = 0;
+        let totalCost = 0;
+        let totalCredits = 0;
+        let totalInputTokens = 0;
+        let totalOutputTokens = 0;
+        let totalThinkingTokens = 0;
+        let totalCacheRead = 0;
+        let totalCacheCreation = 0;
+        for (const bucket of this._accounts.values()) {
+            totalCalls += bucket.totalCalls;
+            totalCost += bucket.totalEstimatedCost;
+            totalCredits += bucket.totalCredits;
+            totalInputTokens += bucket.totalInputTokens;
+            totalOutputTokens += bucket.totalOutputTokens;
+            totalThinkingTokens += bucket.totalThinkingTokens;
+            totalCacheRead += bucket.totalCacheRead;
+            totalCacheCreation += bucket.totalCacheCreation;
+        }
+        for (const entry of this._settled) {
+            totalCalls += entry.totalCalls;
+            totalCost += entry.totalEstimatedCost;
+            totalCredits += entry.totalCredits;
+            totalInputTokens += entry.totalInputTokens;
+            totalOutputTokens += entry.totalOutputTokens;
+            totalThinkingTokens += entry.totalThinkingTokens || 0;
+            totalCacheRead += entry.totalCacheRead;
+            totalCacheCreation += entry.totalCacheCreation || 0;
+        }
+        return {
+            totalCalls,
+            totalCost,
+            totalCredits,
+            totalInputTokens,
+            totalOutputTokens,
+            totalThinkingTokens,
+            totalCacheRead,
+            totalCacheCreation,
+            totalAdditiveTokens: totalInputTokens + totalCacheRead + totalCacheCreation + totalOutputTokens,
+        };
+    }
+    /** Check if ledger has any data (active or settled) */
+    get hasData() {
+        for (const bucket of this._accounts.values()) {
+            if (bucket.totalCalls > 0) {
+                return true;
+            }
+        }
+        return this._settled.length > 0;
+    }
+    // ─── Serialization ───────────────────────────────────────────────────
+    serialize() {
+        const snapshot = this.getLiveDaySnapshot(this._dateKey);
+        return {
+            version: 1,
+            dateKey: snapshot.dateKey,
+            accounts: snapshot.accounts,
+            settled: snapshot.settled,
+        };
+    }
+    static restore(data) {
+        const ledger = new DailyLedger();
+        if (!data || data.version !== 1) {
+            return ledger;
+        }
+        // Always restore the data — even if it's from a previous day.
+        // If the IDE was off overnight, the data hasn't been rolled over yet.
+        // performDailyArchival() will call rollover() to flush it before
+        // starting the new day. Empty stale ledgers are normalized instead;
+        // there is nothing to flush.
+        ledger._dateKey = data.dateKey;
+        ledger._settled = Array.isArray(data.settled)
+            ? data.settled.map(s => {
+                const clonedBreakdown = cloneSurfaceBreakdown(s.surfaceBreakdown);
+                return {
+                    ...s,
+                    ...(clonedBreakdown ? { surfaceBreakdown: clonedBreakdown } : {}),
+                };
+            })
+            : [];
+        if (data.accounts && typeof data.accounts === 'object') {
+            for (const [email, bucket] of Object.entries(data.accounts)) {
+                const restoredModelStats = {};
+                if (bucket.modelStats && typeof bucket.modelStats === 'object') {
+                    for (const [k, v] of Object.entries(bucket.modelStats)) {
+                        restoredModelStats[k] = { ...v };
+                    }
+                }
+                const clonedBreakdown = cloneSurfaceBreakdown(bucket.surfaceBreakdown);
+                const restored = {
+                    ...bucket,
+                    modelStats: restoredModelStats,
+                    recordedCallIds: Array.isArray(bucket.recordedCallIds)
+                        ? [...bucket.recordedCallIds]
+                        : [],
+                    recordedCalls: Array.isArray(bucket.recordedCalls)
+                        ? bucket.recordedCalls.map(c => ({ ...c }))
+                        : [],
+                    ...(clonedBreakdown ? { surfaceBreakdown: clonedBreakdown } : {}),
+                };
+                ledger._accounts.set(email, restored);
+                // Rebuild dedup set
+                for (const id of restored.recordedCallIds) {
+                    ledger._allRecordedIds.add(id);
+                }
+            }
+        }
+        ledger.normalizeIfStaleEmpty();
+        return ledger;
+    }
+    // ─── Internal ────────────────────────────────────────────────────────
+    _resetForNewDay(newDateKey) {
+        this._dateKey = newDateKey;
+        this._accounts.clear();
+        this._settled = [];
+        this._allRecordedIds.clear();
+    }
+}
+exports.DailyLedger = DailyLedger;
+//# sourceMappingURL=daily-ledger.js.map

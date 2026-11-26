@@ -1,0 +1,920 @@
+"use strict";
+// ─── Shared Pure Webview Document Builder ────────────────────────────────────
+// Renders the complete Studio Telemetry Ledger HTML document and incremental
+// tab payloads for BOTH Antigravity IDE (VS Code Webview) and Antigravity App
+// (Desktop 2.0+ native Sidecar plugin).
+//
+// ZERO `vscode` runtime imports — safe in pure Node / Sidecar / unit tests.
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.normalizeMonitorDocumentSettings = exports.DEFAULT_MONITOR_DOCUMENT_SETTINGS = void 0;
+exports.buildNativeHudHtml = buildNativeHudHtml;
+exports.buildMonitorMastheadControlsHtml = buildMonitorMastheadControlsHtml;
+exports.buildMonitorTabsPayload = buildMonitorTabsPayload;
+exports.buildMonitorShellHtml = buildMonitorShellHtml;
+exports.buildMonitorDocumentHtml = buildMonitorDocumentHtml;
+const i18n_core_1 = require("./i18n-core");
+const models_1 = require("./models");
+const activity_panel_1 = require("./activity-panel");
+const pricing_panel_1 = require("./pricing-panel");
+const pricing_store_1 = require("./pricing-store");
+const webview_icons_1 = require("./webview-icons");
+const webview_helpers_1 = require("./webview-helpers");
+const webview_models_tab_1 = require("./webview-models-tab");
+const webview_profile_tab_1 = require("./webview-profile-tab");
+const webview_settings_tab_1 = require("./webview-settings-tab");
+Object.defineProperty(exports, "DEFAULT_MONITOR_DOCUMENT_SETTINGS", { enumerable: true, get: function () { return webview_settings_tab_1.DEFAULT_MONITOR_DOCUMENT_SETTINGS; } });
+Object.defineProperty(exports, "normalizeMonitorDocumentSettings", { enumerable: true, get: function () { return webview_settings_tab_1.normalizeMonitorDocumentSettings; } });
+const webview_about_tab_1 = require("./webview-about-tab");
+const webview_calendar_tab_1 = require("./webview-calendar-tab");
+const webview_chat_history_tab_1 = require("./webview-chat-history-tab");
+const daily_store_1 = require("./daily-store");
+const webview_script_1 = require("./webview-script");
+const webview_styles_1 = require("./webview-styles");
+const webview_editorial_styles_1 = require("./webview-editorial-styles");
+const webview_overview_tab_1 = require("./webview-overview-tab");
+const monitor_overview_1 = require("./monitor-overview");
+const orchestrator_attribution_1 = require("./orchestrator-attribution");
+const telemetry_metrics_1 = require("./telemetry-metrics");
+const cli_usage_scanner_1 = require("./cli-usage-scanner");
+// ─── Internal Helpers ────────────────────────────────────────────────────────
+const LOCK_ICON_SVG = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>';
+const UNLOCK_ICON_SVG = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 4.6-1.3"/></svg>';
+const HUD_CHEVRON_SVG = '<svg class="native-hud-toggle-chevron" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>';
+function buildEocSentinel() {
+    return `<div class="eoc-sentinel"><span class="eoc-sentinel-text">${(0, webview_helpers_1.tBiHtml)('End of content', '已到底')}</span></div>`;
+}
+function resolveExtras(params) {
+    const nested = params.extras ?? {};
+    return {
+        surface: params.surface ?? nested.surface ?? 'ide',
+        version: params.version ?? nested.version,
+        contextBreakdown: params.contextBreakdown !== undefined ? params.contextBreakdown : nested.contextBreakdown,
+        turnDiagnostics: params.turnDiagnostics !== undefined ? params.turnDiagnostics : nested.turnDiagnostics,
+        quotaRunways: params.quotaRunways ?? nested.quotaRunways,
+        isCustomModelActive: params.isCustomModelActive !== undefined ? params.isCustomModelActive : nested.isCustomModelActive,
+        staleState: params.staleState !== undefined ? params.staleState : nested.staleState,
+        conversationOptions: params.conversationOptions ?? nested.conversationOptions,
+        activeConversationId: params.activeConversationId !== undefined ? params.activeConversationId : nested.activeConversationId,
+        pinnedConversationId: params.pinnedConversationId !== undefined ? params.pinnedConversationId : nested.pinnedConversationId,
+        lockToMainAgent: params.lockToMainAgent !== undefined
+            ? params.lockToMainAgent
+            : (nested.lockToMainAgent ?? params.settings?.lockToMainAgent ?? params.appSettings?.lockToMainAgent ?? false),
+        extraHeadHtml: params.extraHeadHtml ?? nested.extraHeadHtml,
+        extraBodyEndHtml: params.extraBodyEndHtml ?? nested.extraBodyEndHtml,
+        imagesBaseUri: params.imagesBaseUri ?? nested.imagesBaseUri,
+        calendarOptions: params.calendarOptions ?? nested.calendarOptions,
+        orchestratorPricingMode: params.orchestratorPricingMode ?? nested.orchestratorPricingMode,
+        appSettings: params.appSettings ?? nested.appSettings,
+        cdpStatus: params.cdpStatus !== undefined ? params.cdpStatus : nested.cdpStatus,
+        updateStatus: params.updateStatus !== undefined ? params.updateStatus : nested.updateStatus,
+        lowQuotaWarning: params.lowQuotaWarning !== undefined ? params.lowQuotaWarning : nested.lowQuotaWarning,
+        turnCacheInfo: params.turnCacheInfo !== undefined ? params.turnCacheInfo : nested.turnCacheInfo,
+        watermarks: params.watermarks !== undefined ? params.watermarks : nested.watermarks,
+        speedSample: params.speedSample !== undefined ? params.speedSample : nested.speedSample,
+        orchestratorSplit: params.orchestratorSplit !== undefined ? params.orchestratorSplit : nested.orchestratorSplit,
+    };
+}
+function resolveUpdateStatusView(raw, fallbackCheck, currentVersion) {
+    if (raw) {
+        return {
+            currentVersion: ('currentVersion' in raw && raw.currentVersion) ? raw.currentVersion : currentVersion,
+            latestVersion: raw.latestVersion ?? ('releaseInfo' in raw ? raw.releaseInfo?.version : undefined) ?? null,
+            updateAvailable: Boolean(('updateAvailable' in raw && raw.updateAvailable) || raw.hasUpdate || raw.status === 'update_available'),
+            hasUpdate: Boolean(raw.hasUpdate || ('updateAvailable' in raw && raw.updateAvailable)),
+            status: raw.status,
+            checkedAt: raw.checkedAt ?? null,
+            releaseUrl: ('releaseUrl' in raw ? raw.releaseUrl : undefined) ?? ('releaseInfo' in raw ? raw.releaseInfo?.releaseUrl : undefined) ?? null,
+            releaseNotesSummary: ('releaseNotesSummary' in raw ? raw.releaseNotesSummary : undefined) ?? ('releaseInfo' in raw ? raw.releaseInfo?.releaseNotesSummary : undefined) ?? null,
+            error: raw.error ?? null,
+            requiresReload: 'requiresReload' in raw ? raw.requiresReload : undefined,
+        };
+    }
+    if (fallbackCheck) {
+        return {
+            currentVersion,
+            latestVersion: fallbackCheck.latestVersion ?? null,
+            updateAvailable: Boolean(fallbackCheck.hasUpdate),
+            hasUpdate: Boolean(fallbackCheck.hasUpdate),
+            status: fallbackCheck.error
+                ? 'error'
+                : (fallbackCheck.hasUpdate ? 'update_available' : 'up_to_date'),
+            checkedAt: fallbackCheck.checkedAt,
+            releaseUrl: fallbackCheck.releaseUrl ?? null,
+            releaseNotesSummary: fallbackCheck.releaseNotesSummary ?? null,
+            error: fallbackCheck.error ?? null,
+        };
+    }
+    return null;
+}
+function resolveDisplayCurrencyFromSettings(settings, appSettings) {
+    const code = appSettings?.displayCurrency ?? settings?.displayCurrency ?? 'USD';
+    const customRate = appSettings?.customFxRate !== undefined
+        ? appSettings.customFxRate
+        : settings?.customFxRate;
+    return {
+        code,
+        ...(typeof customRate === 'number' && Number.isFinite(customRate) && customRate > 0
+            ? { customRatePerUsd: customRate }
+            : {}),
+    };
+}
+function resolveSubscriptionFromSettings(settings, appSettings, currency) {
+    const fee = appSettings?.subscriptionMonthlyFee !== undefined
+        ? appSettings.subscriptionMonthlyFee
+        : settings?.subscriptionMonthlyFee;
+    const rawPlan = appSettings?.subscriptionPlan ?? settings?.subscriptionPlan;
+    const planId = (0, cli_usage_scanner_1.normalizeSubscriptionPlanId)(rawPlan, typeof fee === 'number' ? fee : null);
+    if (planId === 'none') {
+        return null;
+    }
+    const feeCurrency = appSettings?.subscriptionCurrency ?? settings?.subscriptionCurrency ?? currency.code;
+    return {
+        planId,
+        ...(typeof fee === 'number' && Number.isFinite(fee) && fee > 0 ? { monthlyFee: fee } : {}),
+        feeCurrency,
+        ...(currency.customRatePerUsd ? { customRatePerUsd: currency.customRatePerUsd } : {}),
+    };
+}
+function resolvePricingStore(params) {
+    if (params.pricingStore) {
+        return {
+            store: params.pricingStore,
+            customPricing: params.pricingStore.getCustom(),
+        };
+    }
+    const overrides = params.customPricing ?? params.pricingOverrides;
+    if (overrides !== undefined || params.gmSummary || params.gmFullSummary) {
+        const ephemeral = new pricing_store_1.PricingStore();
+        ephemeral.init({
+            get: (_k, d) => (overrides !== undefined ? overrides : d),
+            update: async () => { },
+        });
+        return {
+            store: ephemeral,
+            customPricing: overrides ?? {},
+        };
+    }
+    return { store: undefined, customPricing: {} };
+}
+function resolveDailyStore(params) {
+    if (params.dailyStore) {
+        return params.dailyStore;
+    }
+    if (params.dailyStoreSnapshot) {
+        const hydrated = new daily_store_1.DailyStore();
+        hydrated.restoreSnapshot(params.dailyStoreSnapshot);
+        return hydrated;
+    }
+    return undefined;
+}
+function truncateText(text, maxLen) {
+    const clean = text.replace(/\s+/g, ' ').trim();
+    if (clean.length <= maxLen) {
+        return clean;
+    }
+    return `${clean.slice(0, Math.max(1, maxLen - 1))}…`;
+}
+function formatConversationOptionLabel(opt) {
+    const tags = [];
+    if (opt.isRunning) {
+        tags.push((0, i18n_core_1.tBi)('Running', '运行中'));
+    }
+    if (opt.isSubagent) {
+        tags.push((0, i18n_core_1.tBi)('Subagent', '子智能体'));
+    }
+    if (opt.isLockedMain) {
+        tags.push((0, i18n_core_1.tBi)('Main', '主会话'));
+    }
+    if (opt.workspaceLabel) {
+        tags.push(truncateText(opt.workspaceLabel, 18));
+    }
+    const titlePart = truncateText(opt.title || opt.cascadeId.slice(0, 8), 38);
+    return tags.length > 0 ? `${titlePart} [${tags.join(' · ')}]` : titlePart;
+}
+// ─── Native Sidecar Collapsible Ambient HUD (v1.17.6, Zero-CDP) ─────────────
+/**
+ * Render the sleek Studio-Telemetry collapsible ambient HUD strip placed right
+ * below the topbar. Works out of the box with zero CDP on both App and IDE.
+ */
+function buildNativeHudHtml(input) {
+    const now = input.now ?? Date.now();
+    const reading = input.usage ? (0, monitor_overview_1.getContextReading)(input.usage) : null;
+    const rawPct = reading?.percent ?? null;
+    const clampedPct = rawPct !== null && Number.isFinite(rawPct) ? Math.max(0, Math.min(100, rawPct)) : 0;
+    const ringCircumference = 2 * Math.PI * 8; // r = 8 -> 50.265
+    const ringOffset = ringCircumference * (1 - clampedPct / 100);
+    const ringTone = rawPct === null
+        ? ' is-muted'
+        : rawPct >= 85
+            ? ' is-danger'
+            : rawPct >= 65
+                ? ' is-warn'
+                : ' is-good';
+    const ctxPctText = rawPct !== null && Number.isFinite(rawPct) ? `${Math.round(rawPct)}%` : '—';
+    const watermarks = input.watermarks !== undefined
+        ? input.watermarks
+        : (input.usage && reading && reading.used !== null && reading.limit !== null
+            ? (0, orchestrator_attribution_1.computeContextWatermarks)({
+                contextUsed: reading.used,
+                compactionLimit: reading.limit,
+                physicalContextWindow: input.contextBreakdown?.nativeLimitTokens,
+                model: input.usage.model,
+            })
+            : null);
+    const ctxTipParts = [];
+    if (reading && reading.used !== null && reading.limit !== null) {
+        ctxTipParts.push(`${(0, i18n_core_1.tBi)('Context', '上下文')}: ${(0, monitor_overview_1.formatCompactTokens)(reading.used)} / ${(0, monitor_overview_1.formatCompactTokens)(reading.limit)}`);
+    }
+    if (watermarks?.hasDistinctPhysicalWindow) {
+        ctxTipParts.push(`${(0, i18n_core_1.tBi)('Physical', '物理窗口')}: ${(0, monitor_overview_1.formatCompactTokens)(watermarks.physicalContextWindow)}`);
+    }
+    if (watermarks?.showLongContextMarker) {
+        ctxTipParts.push(watermarks.exceedsLongContextTier
+            ? (0, i18n_core_1.tBi)('> 200k long-context tier', '已超 200k 长上下文阶梯')
+            : (0, i18n_core_1.tBi)('Below 200k tier', '低于 200k 阶梯'));
+    }
+    const ctxTipAttr = ctxTipParts.length ? ` title="${(0, webview_helpers_1.esc)(ctxTipParts.join(' · '))}"` : '';
+    // Telemetry (Speed with Short sample guard, TTFT, Cache Hit %)
+    const activeCascadeId = input.activeCascadeId || input.usage?.cascadeId;
+    const telemetry = (0, monitor_overview_1.extractOverviewTelemetry)(input.gmSummary, activeCascadeId, input.customPricing, input.orchestratorPricingMode);
+    const primary = telemetry?.primary ?? null;
+    const speedSample = input.speedSample
+        ?? primary?.latestSpeedSample
+        ?? (primary?.latestCall
+            ? (0, orchestrator_attribution_1.evaluateSpeedSample)({
+                outputTokens: primary.latestCall.outputTokens,
+                streamingSeconds: primary.latestCall.streamingSeconds,
+                ttftSeconds: primary.latestCall.ttftSeconds,
+            })
+            : null);
+    let speedValHtml = '—';
+    let speedChipCls = ' is-muted';
+    let speedAttr = '';
+    let speedTip = '';
+    if (speedSample?.isWaitingTtft) {
+        speedValHtml = (0, webview_helpers_1.tBiHtml)('Waiting TTFT', '等待首字');
+        speedAttr = ' data-hud-speed="waiting-ttft"';
+        speedTip = (0, i18n_core_1.tBi)('Waiting for first token', '正在等待模型首字输出');
+    }
+    else if (speedSample?.isShortSample) {
+        speedValHtml = (0, webview_helpers_1.tBiHtml)('Short sample', '短样本');
+        speedAttr = ' data-hud-speed="short-sample"';
+        speedTip = speedSample.rawSpeed !== null
+            ? `${(0, i18n_core_1.tBi)('Raw (short sample)', '原始值（短样本）')}: ${(0, telemetry_metrics_1.formatSpeed)(speedSample.rawSpeed)}`
+            : (0, i18n_core_1.tBi)('Short sample (< 16 tokens or < 0.3s)', '短样本（输出不足 16 tokens 或耗时不足 0.3s）');
+    }
+    else if (telemetry?.speedPrimary !== null && telemetry?.speedPrimary !== undefined) {
+        speedValHtml = (0, webview_helpers_1.esc)((0, telemetry_metrics_1.formatSpeed)(telemetry.speedPrimary));
+        speedChipCls = '';
+        speedTip = primary?.weightedGenTokPerSec !== null && primary?.weightedGenTokPerSec !== undefined
+            ? `${(0, i18n_core_1.tBi)('Weighted Avg', '加权平均')}: ${(0, telemetry_metrics_1.formatSpeed)(primary.weightedGenTokPerSec)}`
+            : '';
+    }
+    const speedTitleAttr = speedTip ? ` title="${(0, webview_helpers_1.esc)(speedTip)}"` : '';
+    const ttftVal = telemetry ? (0, telemetry_metrics_1.formatLatency)(telemetry.ttftPrimary) : '—';
+    const ttftCls = ttftVal === '—' ? ' is-muted' : '';
+    const cacheVal = primary ? (0, telemetry_metrics_1.formatCachePercent)(primary.tokenCacheHitRate) : '—';
+    const cacheCls = primary?.tokenCacheHitRate !== null && primary?.tokenCacheHitRate !== undefined && primary.tokenCacheHitRate > 0
+        ? ' is-good'
+        : ' is-muted';
+    // Cost (selected display currency)
+    const primaryCostUsd = typeof input.sessionCostUsd === 'number' && Number.isFinite(input.sessionCostUsd) && input.sessionCostUsd >= 0
+        ? input.sessionCostUsd
+        : (typeof input.todayCostUsd === 'number' && Number.isFinite(input.todayCostUsd) && input.todayCostUsd >= 0
+            ? input.todayCostUsd
+            : null);
+    const { preset: currencyPreset } = (0, cli_usage_scanner_1.resolveCurrencyConfig)(input.displayCurrency);
+    const costDisplay = primaryCostUsd !== null
+        ? (0, cli_usage_scanner_1.formatCurrencyAmount)(primaryCostUsd, input.displayCurrency)
+        : '—';
+    const costCls = costDisplay === '—' ? ' is-muted' : '';
+    const costTip = primaryCostUsd !== null
+        ? (currencyPreset.code !== 'USD'
+            ? (0, cli_usage_scanner_1.formatDualCurrencyAmount)(primaryCostUsd, input.displayCurrency)
+            : `${(0, i18n_core_1.tBi)('Est. Cost', '估算费用')}: ${costDisplay}`)
+        : '';
+    const costTitleAttr = costTip ? ` title="${(0, webview_helpers_1.esc)(costTip)}"` : '';
+    // Tightest Quota % + reset tag
+    const quotaGroups = (0, monitor_overview_1.selectMonitorQuotaGroups)(input.modelConfigs, input.usage?.model, input.quotaSummary);
+    let tightestQuotaHtml = '—';
+    let tightestQuotaCls = ' is-muted';
+    let tightestQuotaTip = '';
+    if (input.isCustomModelActive) {
+        tightestQuotaHtml = (0, webview_helpers_1.tBiHtml)('BYOK', '自定义');
+        tightestQuotaCls = '';
+        tightestQuotaTip = (0, i18n_core_1.tBi)('Custom / BYOK model isolated from Google quota pools', '自定义 / BYOK 模型不消耗 Google 配额池');
+    }
+    else if (quotaGroups.length > 0) {
+        let bestPct = null;
+        let bestReset = '';
+        let bestLabel = '';
+        for (const group of quotaGroups) {
+            const candidates = [];
+            if (group.fiveHourQuota) {
+                candidates.push({ frac: group.fiveHourQuota.remainingFraction, reset: group.fiveHourQuota.resetTime });
+            }
+            if (group.weeklyQuota) {
+                candidates.push({ frac: group.weeklyQuota.remainingFraction, reset: group.weeklyQuota.resetTime });
+            }
+            if (candidates.length === 0) {
+                candidates.push({ frac: group.minimum, reset: group.resetTime });
+            }
+            for (const c of candidates) {
+                if (typeof c.frac !== 'number' || !Number.isFinite(c.frac) || c.frac < 0 || c.frac > 1) {
+                    continue;
+                }
+                const pct = Math.round(c.frac * 100);
+                if (bestPct === null || pct < bestPct) {
+                    bestPct = pct;
+                    bestLabel = group.label;
+                    bestReset = c.reset ? (0, monitor_overview_1.resetCountdown)(Date.parse(c.reset), now) : '';
+                }
+            }
+        }
+        if (bestPct !== null) {
+            const resetSuffix = bestReset && !bestReset.includes('unavailable') && !bestReset.includes('暂无')
+                ? ` · ${(0, webview_helpers_1.esc)(bestReset)}`
+                : '';
+            tightestQuotaHtml = `${bestPct}%${resetSuffix}`;
+            tightestQuotaCls = bestPct <= 20 ? ' is-danger' : bestPct < 50 ? ' is-warn' : ' is-good';
+            tightestQuotaTip = `${bestLabel}: ${bestPct}%${bestReset ? ` · ${bestReset}` : ''}`;
+        }
+    }
+    const quotaTitleAttr = tightestQuotaTip ? ` title="${(0, webview_helpers_1.esc)(tightestQuotaTip)}"` : '';
+    // Turn cache start (for expanded micro-breakdown drawer)
+    let turnCache = input.turnCacheInfo ?? null;
+    if (!turnCache && activeCascadeId) {
+        const calls = input.gmConversations?.[activeCascadeId]?.calls
+            ?? input.gmSummary?.conversations?.find(c => c.cascadeId === activeCascadeId)?.calls
+            ?? [];
+        if (calls.length > 0) {
+            turnCache = (0, orchestrator_attribution_1.analyzeUserTurnCacheStates)(calls, {
+                orchestratorConfig: input.usage?.orchestratorConfig,
+                orchestratorHistory: input.usage?.orchestratorHistory,
+                orchestratorSettings: input.orchestratorSettings,
+                orchestratorPricingMode: input.orchestratorPricingMode,
+            });
+        }
+    }
+    // Drawer micro-breakdown content
+    const modelLabel = input.usage
+        ? (0, models_1.localizePickerEffortLabel)((0, models_1.resolveModelId)(input.usage.model) || input.usage.model, input.usage.modelDisplayName, (0, i18n_core_1.getLanguage)())
+        : (0, i18n_core_1.tBi)('No active conversation', '无活跃会话');
+    const activeRoute = input.usage ? (0, monitor_overview_1.resolveActiveOrchestratorRoute)(input.usage) : null;
+    const routeText = activeRoute ? ` · ${activeRoute.plannerLabel} → ${activeRoute.executorLabel}` : '';
+    const topSegmentsText = input.contextBreakdown && input.contextBreakdown.segments.length > 0
+        ? input.contextBreakdown.segments
+            .slice(0, 3)
+            .map(s => `${(0, i18n_core_1.tBi)(s.labelEn, s.labelZh)} ${(0, monitor_overview_1.formatCompactTokens)(s.tokens)}`)
+            .join(' · ')
+        : (reading && reading.used !== null && reading.limit !== null
+            ? `${(0, monitor_overview_1.formatCompactTokens)(reading.used)} / ${(0, monitor_overview_1.formatCompactTokens)(reading.limit)} tokens`
+            : (0, i18n_core_1.tBi)('Awaiting context telemetry', '等待上下文数据'));
+    const turnCacheLabel = turnCache?.latestTurn && turnCache.latestTurn.cacheStart !== 'unknown'
+        ? (() => {
+            const lt = turnCache.latestTurn;
+            const stateStr = lt.cacheStart === 'warm'
+                ? (0, i18n_core_1.tBi)('Warm', '热缓存')
+                : lt.cacheStart === 'partial'
+                    ? (0, i18n_core_1.tBi)('Partial', '部分命中')
+                    : (0, i18n_core_1.tBi)('Cold', '冷启动');
+            const deltaStr = lt.netContextDeltaTokens !== null
+                ? ` · Δ ${lt.netContextDeltaTokens >= 0 ? '+' : '−'}${(0, monitor_overview_1.formatCompactTokens)(Math.abs(lt.netContextDeltaTokens))}`
+                : '';
+            return `${stateStr}${lt.cacheHitPct !== null ? ` (${lt.cacheHitPct.toFixed(0)}%)` : ''}${deltaStr}`;
+        })()
+        : cacheVal;
+    const todayCostDisplay = typeof input.todayCostUsd === 'number' && Number.isFinite(input.todayCostUsd) && input.todayCostUsd >= 0
+        ? (0, cli_usage_scanner_1.formatCurrencyAmount)(input.todayCostUsd, input.displayCurrency)
+        : null;
+    const sessionCostDisplay = typeof input.sessionCostUsd === 'number' && Number.isFinite(input.sessionCostUsd) && input.sessionCostUsd >= 0
+        ? (0, cli_usage_scanner_1.formatCurrencyAmount)(input.sessionCostUsd, input.displayCurrency)
+        : null;
+    const quotaSummaryText = input.isCustomModelActive
+        ? (0, i18n_core_1.tBi)('Custom model isolated', '自定义模型配额独立')
+        : quotaGroups.length > 0
+            ? quotaGroups
+                .slice(0, 3)
+                .map((g) => {
+                const frac = g.fiveHourQuota?.remainingFraction ?? g.minimum;
+                const p = typeof frac === 'number' && Number.isFinite(frac) ? `${Math.round(frac * 100)}%` : '—';
+                return `${g.label} ${p}`;
+            })
+                .join(' · ')
+            : '—';
+    return `<section class="native-hud-bar" id="nativeHudBar" data-native-hud="true" data-hud-expanded="false" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Ambient telemetry HUD', '顶部紧凑遥测 HUD'))}">
+        <div class="native-hud-strip">
+            <div class="native-hud-metrics">
+                <span class="native-hud-chip${ringTone}" data-hud-metric="context"${ctxTipAttr}>
+                    <svg class="native-hud-ring-svg" viewBox="0 0 24 24" aria-hidden="true">
+                        <circle class="native-hud-ring-track" cx="12" cy="12" r="8"></circle>
+                        <circle class="native-hud-ring-fill" cx="12" cy="12" r="8" stroke-dasharray="${ringCircumference.toFixed(2)}" stroke-dashoffset="${ringOffset.toFixed(2)}"></circle>
+                    </svg>
+                    <span class="native-hud-chip-label">${(0, webview_helpers_1.tBiHtml)('Ctx', '上下文')}</span>
+                    <span class="native-hud-chip-val">${(0, webview_helpers_1.esc)(ctxPctText)}</span>
+                </span>
+                <span class="native-hud-chip${speedChipCls}" data-hud-metric="speed"${speedAttr}${speedTitleAttr}>
+                    <span class="native-hud-chip-label">${(0, webview_helpers_1.tBiHtml)('Speed', '速度')}</span>
+                    <span class="native-hud-chip-val">${speedValHtml}</span>
+                </span>
+                <span class="native-hud-chip${ttftCls}" data-hud-metric="ttft">
+                    <span class="native-hud-chip-label">${(0, webview_helpers_1.tBiHtml)('TTFT', '首字')}</span>
+                    <span class="native-hud-chip-val">${(0, webview_helpers_1.esc)(ttftVal)}</span>
+                </span>
+                <span class="native-hud-chip${cacheCls}" data-hud-metric="cache">
+                    <span class="native-hud-chip-label">${(0, webview_helpers_1.tBiHtml)('Cache', '缓存')}</span>
+                    <span class="native-hud-chip-val">${(0, webview_helpers_1.esc)(cacheVal)}</span>
+                </span>
+                <span class="native-hud-chip${costCls}" data-hud-metric="cost"${costTitleAttr}>
+                    <span class="native-hud-chip-label">${(0, webview_helpers_1.tBiHtml)('Cost', '费用')}</span>
+                    <span class="native-hud-chip-val">${(0, webview_helpers_1.esc)(costDisplay)}</span>
+                </span>
+                <span class="native-hud-chip${tightestQuotaCls}" data-hud-metric="quota"${quotaTitleAttr}>
+                    <span class="native-hud-chip-label">${(0, webview_helpers_1.tBiHtml)('Quota', '配额')}</span>
+                    <span class="native-hud-chip-val">${tightestQuotaHtml}</span>
+                </span>
+            </div>
+            <button type="button" class="native-hud-toggle" id="nativeHudToggle"
+                data-action="toggleNativeHud" aria-expanded="false" aria-controls="nativeHudDrawer"
+                aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Toggle HUD micro-breakdown', '展开或收起 HUD 明细'))}">
+                <span>${(0, webview_helpers_1.tBiHtml)('Details', '明细')}</span>
+                ${HUD_CHEVRON_SVG}
+            </button>
+        </div>
+        <div class="native-hud-drawer" id="nativeHudDrawer" hidden>
+            <div class="native-hud-drawer-head">
+                <span class="native-hud-drawer-model">${(0, webview_helpers_1.esc)(modelLabel)}${(0, webview_helpers_1.esc)(routeText)}</span>
+                ${reading && reading.used !== null && reading.limit !== null
+        ? `<span>${(0, webview_helpers_1.esc)((0, monitor_overview_1.formatCompactTokens)(reading.used))} / ${(0, webview_helpers_1.esc)((0, monitor_overview_1.formatCompactTokens)(reading.limit))} tokens</span>`
+        : ''}
+            </div>
+            <div class="native-hud-drawer-grid">
+                <div class="native-hud-card">
+                    <span class="native-hud-card-label">${(0, webview_helpers_1.tBiHtml)('Context Breakdown', '上下文构成')}</span>
+                    <span class="native-hud-card-val">${(0, webview_helpers_1.esc)(ctxPctText)}</span>
+                    <span class="native-hud-card-sub">${(0, webview_helpers_1.esc)(topSegmentsText)}</span>
+                </div>
+                <div class="native-hud-card">
+                    <span class="native-hud-card-label">${(0, webview_helpers_1.tBiHtml)('Speed & TTFT', '速度与首字延迟')}</span>
+                    <span class="native-hud-card-val">${speedValHtml} · ${(0, webview_helpers_1.esc)(ttftVal)}</span>
+                    <span class="native-hud-card-sub">${(0, webview_helpers_1.esc)(speedTip || (primary?.weightedGenTokPerSec ? `${(0, i18n_core_1.tBi)('Avg', '均值')} ${(0, telemetry_metrics_1.formatSpeed)(primary.weightedGenTokPerSec)}` : '—'))}</span>
+                </div>
+                <div class="native-hud-card">
+                    <span class="native-hud-card-label">${(0, webview_helpers_1.tBiHtml)('Prompt Cache & Turn', '提示词缓存与轮次')}</span>
+                    <span class="native-hud-card-val">${(0, webview_helpers_1.esc)(cacheVal)}</span>
+                    <span class="native-hud-card-sub">${(0, webview_helpers_1.esc)(turnCacheLabel)}</span>
+                </div>
+                <div class="native-hud-card">
+                    <span class="native-hud-card-label">${(0, webview_helpers_1.tBiHtml)('Cost & Quotas', '费用与配额')}</span>
+                    <span class="native-hud-card-val">${(0, webview_helpers_1.esc)(sessionCostDisplay || costDisplay)}${todayCostDisplay && sessionCostDisplay ? ` (${(0, i18n_core_1.tBi)('Today', '今日')} ${(0, webview_helpers_1.esc)(todayCostDisplay)})` : ''}</span>
+                    <span class="native-hud-card-sub">${(0, webview_helpers_1.esc)(quotaSummaryText)}</span>
+                </div>
+            </div>
+        </div>
+    </section>`;
+}
+// ─── Masthead Context Controls (Conversation Switcher, Lock, Surface, Stale) ─
+/**
+ * Render the compact masthead toolbar inner HTML containing:
+ * - Conversation Switcher `<select>` (Follow Active + conversation options)
+ * - Persistent "Lock to Main Agent" toggle button
+ * - Surface badge (`Antigravity App` / `Antigravity IDE`)
+ * - Cached / Stale badge when `staleState?.isStale` is true
+ */
+function buildMonitorMastheadControlsHtml(extras) {
+    const surface = extras.surface ?? 'ide';
+    const options = extras.conversationOptions ?? [];
+    const pinnedId = extras.pinnedConversationId || '';
+    const activeId = extras.activeConversationId || '';
+    const locked = Boolean(extras.lockToMainAgent);
+    const currentLang = (0, i18n_core_1.getLanguage)();
+    const activeOption = activeId ? options.find(o => o.cascadeId === activeId) : undefined;
+    const followSuffix = !pinnedId && activeOption
+        ? ` · ${truncateText(activeOption.title || activeId.slice(0, 8), 24)}`
+        : '';
+    const followLabel = `${(0, i18n_core_1.tBi)('Follow Active', '跟随活跃会话')}${followSuffix}`;
+    const optionTags = [
+        `<option value=""${!pinnedId ? ' selected' : ''}>${(0, webview_helpers_1.esc)(followLabel)}</option>`,
+    ];
+    for (const opt of options) {
+        const isSelected = Boolean(pinnedId && opt.cascadeId === pinnedId);
+        const label = formatConversationOptionLabel(opt);
+        optionTags.push(`<option value="${(0, webview_helpers_1.esc)(opt.cascadeId)}"${isSelected ? ' selected' : ''} data-subagent="${opt.isSubagent ? 'true' : 'false'}" data-active="${opt.isActive ? 'true' : 'false'}">${(0, webview_helpers_1.esc)(label)}</option>`);
+    }
+    const surfaceLabelHtml = surface === 'app-sidecar'
+        ? (0, webview_helpers_1.tBiHtml)('Antigravity App', 'Antigravity App')
+        : (0, webview_helpers_1.tBiHtml)('Antigravity IDE', 'Antigravity IDE');
+    const staleBadgeHtml = extras.staleState?.isStale ? (() => {
+        const ts = extras.staleState.lastSuccessAtMs
+            ? ` · ${(0, webview_helpers_1.esc)((0, i18n_core_1.formatClockTime)(new Date(extras.staleState.lastSuccessAtMs), currentLang))}`
+            : '';
+        const errTitle = extras.staleState.lastError ? ` title="${(0, webview_helpers_1.esc)(extras.staleState.lastError)}"` : '';
+        return `<span class="stale-badge" id="staleBadge" role="status"${errTitle}>
+            <span class="stale-dot" aria-hidden="true"></span>
+            <span>${(0, webview_helpers_1.tBiHtml)('Cached / Stale', '缓存数据（待刷新）')}${ts}</span>
+        </span>`;
+    })() : '';
+    return `
+        <div class="masthead-context-controls">
+            <label class="conv-switcher-wrap" for="conversationSwitcher">
+                <span class="sr-only">${(0, webview_helpers_1.tBiHtml)('Conversation Switcher', '会话切换器')}</span>
+                <select id="conversationSwitcher" class="conv-switcher-select" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Conversation Switcher', '会话切换器'))}" data-active-id="${(0, webview_helpers_1.esc)(activeId)}" data-pinned-id="${(0, webview_helpers_1.esc)(pinnedId)}">
+                    ${optionTags.join('')}
+                </select>
+            </label>
+            <button type="button" class="lock-main-btn${locked ? ' is-locked' : ''}" id="lockMainBtn"
+                data-action="toggleLockMain" aria-pressed="${locked ? 'true' : 'false'}"
+                title="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Ignore background subagents and keep tracking the main conversation', '忽略后台子智能体并持续锁定当前主会话'))}">
+                ${locked ? LOCK_ICON_SVG : UNLOCK_ICON_SVG}
+                <span>${(0, webview_helpers_1.tBiHtml)('Lock to Main Agent', '锁定主会话')}</span>
+            </button>
+        </div>
+        <div class="masthead-context-badges">
+            ${staleBadgeHtml}
+            <span class="surface-badge" data-surface="${surface}">${surfaceLabelHtml}</span>
+        </div>`;
+}
+// ─── Public Tab & Document Builders ──────────────────────────────────────────
+function normalizeMonitorStatus(status, usage) {
+    if (!status) {
+        return undefined;
+    }
+    if (typeof status === 'string') {
+        if (status === 'connected') {
+            return { state: usage ? 'active' : 'empty' };
+        }
+        if (status === 'disconnected') {
+            return { state: 'disconnected', backendIssue: 'lost' };
+        }
+        return { state: status };
+    }
+    return status;
+}
+function resolveDailyLedgerBuckets(params) {
+    let todayLedgerActive = params.todayLedgerActive;
+    let ledgerSettled = params.ledgerSettled;
+    const dl = params.dailyLedger;
+    if (dl) {
+        if (!todayLedgerActive) {
+            if ('getTodayActive' in dl && typeof dl.getTodayActive === 'function') {
+                todayLedgerActive = dl.getTodayActive();
+            }
+            else if ('active' in dl && Array.isArray(dl.active)) {
+                todayLedgerActive = dl.active;
+            }
+        }
+        if (!ledgerSettled) {
+            if ('getSettledEntries' in dl && typeof dl.getSettledEntries === 'function') {
+                ledgerSettled = dl.getSettledEntries();
+            }
+            else if ('settled' in dl && Array.isArray(dl.settled)) {
+                ledgerSettled = dl.settled;
+            }
+        }
+    }
+    return {
+        todayLedgerActive: todayLedgerActive ?? [],
+        ledgerSettled: ledgerSettled ?? [],
+    };
+}
+/**
+ * Build incremental tab HTML fragments (shared by initial document build,
+ * VS Code `updateTabs` messages, and App Sidecar `/api/snapshot`).
+ */
+function buildMonitorTabsPayload(params) {
+    const extras = resolveExtras(params);
+    const usage = params.currentUsage !== undefined ? params.currentUsage : (params.data ?? null);
+    const monitorStatus = normalizeMonitorStatus(params.monitorStatus ?? params.backendStatus, usage);
+    const allUsages = params.allTrajectoryUsages ?? (usage ? [usage] : []);
+    const allTrajectories = params.allTrajectories ?? [];
+    const userInfo = params.userInfo !== undefined ? params.userInfo : (params.userStatus?.userInfo ?? null);
+    const modelConfigs = params.modelConfigs ?? params.userStatus?.configs ?? [];
+    const workspaceUri = params.workspaceUri ?? '';
+    const accountSnapshots = params.accountSnapshots ?? [];
+    const billingDays = params.billingDays ?? {};
+    const activeBillingDay = billingDays[userInfo?.email ?? params.activeAccountKey ?? ''] ?? 0;
+    const { todayLedgerActive, ledgerSettled } = resolveDailyLedgerBuckets(params);
+    const gmSummary = params.gmSummary ?? null;
+    const gmFullSummary = params.gmFullSummary ?? gmSummary;
+    const gmConversations = params.gmConversations ?? {};
+    const { store: pricingStore, customPricing } = resolvePricingStore(params);
+    const dailyStore = resolveDailyStore(params);
+    const now = params.now ?? Date.now();
+    const nowDate = new Date(now);
+    const calYear = params.calendarYear ?? nowDate.getFullYear();
+    const calMonth = params.calendarMonth ?? (nowDate.getMonth() + 1);
+    const eoc = buildEocSentinel();
+    const orchestratorPricingMode = extras.orchestratorPricingMode
+        ?? extras.appSettings?.orchestratorPricingMode
+        ?? params.settings?.orchestratorPricingMode
+        ?? pricingStore?.getOrchestratorPricingMode?.();
+    const displayCurrency = resolveDisplayCurrencyFromSettings(params.settings, extras.appSettings);
+    const subscriptionConfig = resolveSubscriptionFromSettings(params.settings, extras.appSettings, displayCurrency);
+    const quotaNotificationThreshold = extras.appSettings?.quotaNotificationThreshold
+        ?? params.settings?.quotaNotificationThreshold;
+    const resolvedUpdateStatus = resolveUpdateStatusView(extras.updateStatus, extras.appSettings?.lastUpdateCheck, extras.version);
+    const overviewHtml = (0, webview_overview_tab_1.buildOverviewTabContent)(usage, modelConfigs, userInfo, activeBillingDay, monitorStatus, now, {
+        gmSummary,
+        gmConversations,
+        customPricing,
+        activeCascadeId: usage?.cascadeId ?? extras.activeConversationId ?? undefined,
+        orchestratorSettings: params.orchestratorSettings,
+        orchestratorPricingMode,
+        quotaSummary: params.quotaSummary,
+        todayCostUsd: params.todayCostUsd,
+        sessionCostUsd: params.sessionCostUsd,
+        contextBreakdown: extras.contextBreakdown,
+        quotaRunways: extras.quotaRunways,
+        isCustomModelActive: extras.isCustomModelActive,
+        staleState: extras.staleState,
+        surface: extras.surface,
+        displayCurrency,
+        quotaNotificationThreshold,
+        lowQuotaWarning: extras.lowQuotaWarning,
+        turnCacheInfo: extras.turnCacheInfo,
+        watermarks: extras.watermarks,
+        speedSample: extras.speedSample,
+        orchestratorSplit: extras.orchestratorSplit,
+    });
+    const gmDataHtml = (0, activity_panel_1.buildGMDataTabContent)(params.activitySummary ?? null, gmSummary, usage, accountSnapshots, todayLedgerActive, ledgerSettled, customPricing, extras.turnDiagnostics);
+    const chatsHtml = (0, webview_chat_history_tab_1.buildChatHistoryTabContent)(allTrajectories, usage, gmSummary, gmConversations, workspaceUri);
+    const pricingHtml = pricingStore
+        ? (0, pricing_panel_1.buildPricingTabContent)(gmFullSummary, pricingStore, dailyStore?.getMonthCostBreakdown(nowDate.getFullYear(), nowDate.getMonth() + 1), ledgerSettled, todayLedgerActive, [usage, ...allUsages].some(item => (item?.imageGenStepCount || 0) > 0), {
+            orchestratorSettings: params.orchestratorSettings,
+            orchestratorPricingMode,
+        })
+        : `<p class="empty-msg">${(0, webview_helpers_1.tBiHtml)('Initializing...', '初始化中...')}</p>`;
+    const modelsHtml = (0, webview_models_tab_1.buildModelsTabContent)(userInfo, modelConfigs, {
+        orchestratorSettings: params.orchestratorSettings,
+        quotaSummary: params.quotaSummary,
+        customPricing,
+        orchestratorPricingMode,
+        quotaRunways: extras.quotaRunways,
+        isCustomModelActive: extras.isCustomModelActive,
+        staleState: extras.staleState,
+    });
+    const hasLiveLedgerData = todayLedgerActive.length > 0 || ledgerSettled.length > 0;
+    const defaultCalendarOptions = {
+        ...(hasLiveLedgerData
+            ? {
+                liveLedger: {
+                    active: todayLedgerActive,
+                    settled: ledgerSettled,
+                    customPricing,
+                    defaultSurface: extras.surface === 'app-sidecar' ? 'app' : 'ide',
+                },
+            }
+            : {}),
+        currency: displayCurrency,
+        subscription: subscriptionConfig,
+        customPricing,
+        now,
+    };
+    const mergedCalendarOptions = extras.calendarOptions
+        ? { ...defaultCalendarOptions, ...extras.calendarOptions }
+        : defaultCalendarOptions;
+    const calendarHtml = (0, webview_calendar_tab_1.buildCalendarTabContent)(dailyStore, calYear, calMonth, mergedCalendarOptions);
+    const profileHtml = (0, webview_profile_tab_1.buildProfileContent)(userInfo, modelConfigs, activeBillingDay, params.quotaSummary);
+    const aboutHtml = (0, webview_about_tab_1.buildAboutTabContent)(extras.version, {
+        surface: extras.surface ?? 'ide',
+        updateStatus: resolvedUpdateStatus,
+        now,
+    });
+    const showNativeHudBar = extras.appSettings?.showNativeHudBar
+        ?? params.settings?.showNativeHudBar
+        ?? (extras.surface === 'app-sidecar');
+    const nativeHudHtml = showNativeHudBar
+        ? buildNativeHudHtml({
+            usage,
+            modelConfigs,
+            quotaSummary: params.quotaSummary,
+            gmSummary,
+            gmConversations,
+            customPricing,
+            sessionCostUsd: params.sessionCostUsd,
+            todayCostUsd: params.todayCostUsd,
+            displayCurrency,
+            contextBreakdown: extras.contextBreakdown,
+            isCustomModelActive: extras.isCustomModelActive,
+            activeCascadeId: usage?.cascadeId ?? extras.activeConversationId,
+            speedSample: extras.speedSample,
+            watermarks: extras.watermarks,
+            turnCacheInfo: extras.turnCacheInfo,
+            orchestratorSettings: params.orchestratorSettings,
+            orchestratorPricingMode,
+            now,
+        })
+        : '';
+    return {
+        overview: overviewHtml + eoc,
+        gmdata: gmDataHtml + eoc,
+        chats: chatsHtml + eoc,
+        pricing: pricingHtml + eoc,
+        models: modelsHtml + eoc,
+        calendar: calendarHtml + eoc,
+        profile: profileHtml + eoc,
+        about: aboutHtml + eoc,
+        accountPopover: accountSnapshots.length > 0 ? (0, activity_panel_1.buildAccountStatusPanel)(accountSnapshots, billingDays) : '',
+        accountPopoverHasReady: accountSnapshots.length > 0 ? (0, activity_panel_1.hasAccountReadyPool)(accountSnapshots) : false,
+        mastheadControls: buildMonitorMastheadControlsHtml(extras),
+        nativeHud: nativeHudHtml,
+    };
+}
+/**
+ * Assemble the full HTML5 document shell from prebuilt tab panes and settings markup.
+ */
+function buildMonitorShellHtml(params) {
+    const { tabs, settingsHtml, extras, paused, initialTab, panelHintPrefs, zoomLevel, accountSnapshots, billingDays, lastUpdatedTime, } = params;
+    const surface = extras.surface ?? 'ide';
+    const currentLang = (0, i18n_core_1.getLanguage)();
+    const htmlLang = currentLang === 'zh' ? 'zh-CN' : currentLang === 'en' ? 'en' : 'zh-CN';
+    const eoc = buildEocSentinel();
+    const imagesAttr = extras.imagesBaseUri ? ` data-images-base-uri="${(0, webview_helpers_1.esc)(extras.imagesBaseUri)}"` : '';
+    const nativeHudHtml = typeof tabs.nativeHud === 'string' ? tabs.nativeHud : '';
+    return `<!DOCTYPE html>
+<html lang="${htmlLang}" data-hide-scrollbar="${panelHintPrefs.showScrollbar ? 'false' : 'true'}">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Antigravity Monitor', 'Antigravity 监控面板'))}</title>
+<style>
+${(0, webview_styles_1.getStyles)()}
+${(0, webview_overview_tab_1.getOverviewStyles)()}
+${(0, activity_panel_1.getGMDataTabStyles)()}
+${(0, pricing_panel_1.getPricingTabStyles)()}
+${(0, webview_calendar_tab_1.getCalendarTabStyles)()}
+${(0, orchestrator_attribution_1.getOrchestratorAttributionStyles)()}
+${(0, webview_about_tab_1.getAboutTabStyles)()}
+${(0, webview_editorial_styles_1.getEditorialStyles)()}
+</style>
+${extras.extraHeadHtml || ''}
+</head>
+<body data-editorial="true" data-acm-surface="${surface}" data-lang="${currentLang}"${initialTab ? ` data-initial-tab="${(0, webview_helpers_1.esc)(initialTab)}"` : ''}${imagesAttr} data-privacy-default="true" data-zoom="${zoomLevel}" data-tab-hint-enabled="${panelHintPrefs.showTabScrollHint ? 'true' : 'false'}" data-hide-scrollbar="${panelHintPrefs.showScrollbar ? 'false' : 'true'}" data-hide-eoc="${panelHintPrefs.showEndOfContent ? 'false' : 'true'}">
+    <div class="panel-topbar">
+        <header class="topbar-title">
+            <div class="topbar-title-left">
+                <h1>
+                    ${webview_icons_1.ICON.chart}
+                    <span class="topbar-brand-text">${(0, webview_helpers_1.tBiHtml)('Antigravity Monitor', 'Antigravity 监控面板')}</span>
+                </h1>
+                <div class="acct-popover-anchor">
+                    <button class="acct-popover-trigger" id="acctPopoverTrigger" aria-expanded="false" aria-controls="acctPopoverPanel">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M5.5 21a6.5 6.5 0 0 1 13 0"/><path d="M16.5 6.5l2 -2M18 8l2.5 -1M18.5 4.5L20 2.5" opacity="0.5"/></svg>
+                        <span>${(0, webview_helpers_1.tBiHtml)('Account Panel', '账号面板')}</span>
+                        ${(0, activity_panel_1.hasAccountReadyPool)(accountSnapshots) ? '<span class="acct-popover-dot" aria-hidden="true"></span>' : ''}
+                    </button>
+                </div>
+            </div>
+            <div class="header-actions">
+                <div class="lang-switcher">
+                    <button class="lang-btn${currentLang === 'zh' ? ' active' : ''}" data-lang="zh">中文</button>
+                    <button class="lang-btn${currentLang === 'en' ? ' active' : ''}" data-lang="en">EN</button>
+                    <button class="lang-btn${currentLang === 'both' ? ' active' : ''}" data-lang="both">${(0, webview_helpers_1.tBiHtml)('Both', '双语')}</button>
+                </div>
+                <button class="action-btn${paused ? ' paused' : ''}" id="pauseBtn"
+                    aria-pressed="${paused}" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)(paused ? 'Resume auto-refresh' : 'Pause auto-refresh', paused ? '恢复自动刷新' : '暂停自动刷新'))}"
+                    data-label-pause="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Pause auto-refresh', '暂停自动刷新'))}"
+                    data-label-resume="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Resume auto-refresh', '恢复自动刷新'))}"
+                    data-label-paused="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('PAUSED', '已暂停'))}"
+                    data-tooltip="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)(paused ? 'Resume auto-refresh' : 'Pause auto-refresh', paused ? '恢复自动刷新' : '暂停自动刷新'))}">
+                    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">${paused
+        ? '<path fill="currentColor" d="M11.596 8.697l-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393"/>'
+        : '<path fill="currentColor" d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5m5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5"/>'}</svg>
+                </button>
+                <button class="action-btn" id="refreshBtn" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Refresh', '刷新'))}" data-tooltip="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Refresh', '刷新'))}">
+                    ${webview_icons_1.ICON.refresh}
+                </button>
+                <span class="update-time">${paused ? `<span class="paused-indicator">${(0, webview_helpers_1.tBiHtml)('PAUSED', '已暂停')}</span>` : ''} ${(0, webview_helpers_1.esc)(lastUpdatedTime)}</span>
+            </div>
+        </header>
+
+        <div class="masthead-context-bar" id="mastheadContextBar">
+            ${tabs.mastheadControls}
+        </div>
+
+        <div class="tab-bar-wrapper">
+        <button class="tab-arrow tab-arrow-left is-faded" id="tabArrowLeft" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Scroll tabs left', '向左滚动标签'))}">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M11.354 1.646a.5.5 0 0 1 0 .708L5.707 8l5.647 5.646a.5.5 0 0 1-.708.708l-6-6a.5.5 0 0 1 0-.708l6-6a.5.5 0 0 1 .708 0"/></svg>
+        </button>
+        <nav class="tab-bar" id="tabBar" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Monitor sections', '监控面板分区'))}">
+        <div class="tab-slider"></div>
+        <button class="tab-btn active" data-tab="overview" data-color="blue" aria-current="page">${webview_icons_1.ICON.chart}<span class="tab-label">${(0, webview_helpers_1.tBiHtml)('Overview', '总览')}</span></button>
+        <button class="tab-btn" data-tab="gmdata" data-color="orange">${webview_icons_1.ICON.bolt}<span class="tab-label">${(0, webview_helpers_1.tBiHtml)('GM Data', 'GM 数据')}</span></button>
+        <button class="tab-btn" data-tab="chats" data-color="cyan">${webview_icons_1.ICON.chat}<span class="tab-label">${(0, webview_helpers_1.tBiHtml)('Sessions', '会话')}</span></button>
+        <button class="tab-btn" data-tab="pricing" data-color="blue"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M4 10.781c.148 1.667 1.513 2.85 3.591 3.003V15h1.043v-1.216c2.27-.179 3.678-1.438 3.678-3.315 0-1.667-1.104-2.512-3.233-3.037l-.445-.107V3.63c1.213.183 1.968.91 2.141 1.88h1.762c-.112-1.796-1.519-2.965-3.455-3.124V1.036H8.59v1.383C6.408 2.583 5.008 3.9 5.003 5.54c0 1.592 1.063 2.457 3.146 2.963l.399.1v3.979c-1.29-.183-2.113-.879-2.275-1.8H4zm4.586-4.34C7.494 6.137 6.94 5.695 6.94 5.092c0-.66.52-1.183 1.575-1.37v2.72h.071zm.889 2.283c1.335.36 1.942.846 1.942 1.548 0 .781-.633 1.35-1.823 1.493V8.851l-.119-.127z"/></svg><span class="tab-label">${(0, webview_helpers_1.tBiHtml)('Cost', '成本')}</span></button>
+        <button class="tab-btn" data-tab="models" data-color="green">${webview_icons_1.ICON.bolt}<span class="tab-label">${(0, webview_helpers_1.tBiHtml)('Models', '模型')}</span></button>
+        <button class="tab-btn" data-tab="calendar" data-color="cyan"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M3.5 0a.5.5 0 0 1 .5.5V1h8V.5a.5.5 0 0 1 1 0V1h1a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2h1V.5a.5.5 0 0 1 .5-.5M1 4v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4z"/></svg><span class="tab-label">${(0, webview_helpers_1.tBiHtml)('Calendar', '日历')}</span></button>
+        <button class="tab-btn" data-tab="profile" data-color="gray">${webview_icons_1.ICON.user}<span class="tab-label">${(0, webview_helpers_1.tBiHtml)('Profile', '账号')}</span></button>
+        <button class="tab-btn" data-tab="settings" data-color="gray">${webview_icons_1.ICON.shield}<span class="tab-label">${(0, webview_helpers_1.tBiHtml)('Settings', '设置')}</span></button>
+        <button class="tab-btn" data-tab="about" data-color="orange"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14m0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16"/><path fill="currentColor" d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0"/></svg><span class="tab-label">${(0, webview_helpers_1.tBiHtml)('About', '关于')}</span></button>
+    </nav>
+        <button class="tab-arrow tab-arrow-right is-faded" id="tabArrowRight" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Scroll tabs right', '向右滚动标签'))}">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M4.646 1.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1 0 .708l-6 6a.5.5 0 0 1-.708-.708L10.293 8 4.646 2.354a.5.5 0 0 1 0-.708"/></svg>
+        </button>
+    </div>
+
+    <div class="tab-scroll-hint" id="tabScrollHint" hidden>
+        <span class="tab-scroll-hint-text">${webview_icons_1.ICON.timeline} <span>${(0, webview_helpers_1.tBiHtml)('Too many tabs? Hold Shift and use the mouse wheel to scroll horizontally.', '标签过多时，可按住 Shift 再滚动鼠标滚轮进行横向滚动。')}</span></span>
+        <button class="tab-scroll-hint-close" id="dismissTabScrollHint" aria-label="${(0, webview_helpers_1.esc)((0, i18n_core_1.tBi)('Dismiss tab scroll hint', '关闭标签滚动提示'))}">
+            <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path fill="currentColor" d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06"/></svg>
+        </button>
+    </div>
+    <div class="acct-popover-dropdown" id="acctPopoverPanel" hidden>
+        <div class="acct-popover-body" id="acctPopoverBody">
+            ${accountSnapshots.length > 0 ? (0, activity_panel_1.buildAccountStatusPanel)(accountSnapshots, billingDays) : `<p class="empty-msg">${(0, webview_helpers_1.tBiHtml)('No account data yet.', '暂无账号数据。')}</p>`}
+        </div>
+    </div>
+    </div>
+    <div class="native-hud-host" id="nativeHudHost"${nativeHudHtml ? '' : ' hidden'}>${nativeHudHtml}</div>
+    <main id="monitor-content">
+    <div class="tab-pane active" id="tab-overview">
+        ${tabs.overview}
+    </div>
+    <div class="tab-pane" id="tab-gmdata">
+        ${tabs.gmdata}
+    </div>
+    <div class="tab-pane" id="tab-chats">
+        ${tabs.chats}
+    </div>
+    <div class="tab-pane" id="tab-pricing">
+        ${tabs.pricing}
+    </div>
+    <div class="tab-pane" id="tab-models">
+        ${tabs.models}
+    </div>
+    <div class="tab-pane" id="tab-calendar">
+        ${tabs.calendar}
+    </div>
+    <div class="tab-pane" id="tab-profile">
+        ${tabs.profile}
+    </div>
+    <div class="tab-pane" id="tab-settings">
+        ${settingsHtml}
+        ${eoc}
+    </div>
+    <div class="tab-pane" id="tab-about">
+        ${tabs.about}
+    </div>
+
+    </main>
+    <script>
+        ${(0, webview_script_1.getScript)()}
+    </script>
+    ${extras.extraBodyEndHtml || ''}
+</body>
+</html>`;
+}
+/**
+ * Render a complete, self-contained Monitor HTML document for either
+ * Antigravity IDE (`surface: 'ide'`) or Antigravity App (`surface: 'app-sidecar'`).
+ */
+function buildMonitorDocumentHtml(params) {
+    const extras = resolveExtras(params);
+    const tabs = buildMonitorTabsPayload(params);
+    const modelConfigs = params.modelConfigs ?? params.userStatus?.configs ?? [];
+    const panelHintPrefs = params.panelHintPrefs ?? {
+        showTabScrollHint: true,
+        showScrollbar: false,
+        showEndOfContent: true,
+    };
+    const mergedSettings = params.settings
+        ? {
+            ...params.settings,
+            ...(extras.lockToMainAgent !== undefined ? { lockToMainAgent: extras.lockToMainAgent } : {}),
+            ...(extras.orchestratorPricingMode !== undefined ? { orchestratorPricingMode: extras.orchestratorPricingMode } : {}),
+        }
+        : (extras.surface === 'app-sidecar'
+            ? {
+                ...webview_settings_tab_1.DEFAULT_MONITOR_DOCUMENT_SETTINGS,
+                lockToMainAgent: !!extras.lockToMainAgent,
+                ...(extras.orchestratorPricingMode !== undefined ? { orchestratorPricingMode: extras.orchestratorPricingMode } : {}),
+            }
+            : undefined);
+    const resolvedUpdateStatus = resolveUpdateStatusView(extras.updateStatus, extras.appSettings?.lastUpdateCheck, extras.version);
+    const zoomLevel = params.zoomLevel ?? 100;
+    const settingsHtml = (0, webview_settings_tab_1.buildSettingsContent)(modelConfigs, params.storageDiagnostics, panelHintPrefs, {
+        settings: mergedSettings,
+        appSettings: extras.appSettings,
+        surface: extras.surface ?? 'ide',
+        zoomLevel,
+        version: extras.version,
+        cdpStatus: extras.cdpStatus,
+        updateStatus: resolvedUpdateStatus,
+    });
+    const paused = Boolean(params.paused ?? params.isPaused ?? false);
+    const now = params.now ?? Date.now();
+    const lastUpdatedTime = params.lastUpdatedTime || (0, i18n_core_1.formatClockTime)(new Date(now), (0, i18n_core_1.getLanguage)());
+    return buildMonitorShellHtml({
+        tabs,
+        settingsHtml,
+        extras,
+        paused,
+        initialTab: params.initialTab,
+        panelHintPrefs,
+        zoomLevel,
+        accountSnapshots: params.accountSnapshots ?? [],
+        billingDays: params.billingDays ?? {},
+        lastUpdatedTime,
+    });
+}
+//# sourceMappingURL=webview-document.js.map

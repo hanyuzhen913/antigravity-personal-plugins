@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "global": {
+    "displayLanguage": "zh",
+    "quotaTrackingEnabled": true,
+    "lockToMainAgent": false,
+    "subscriptionPlan": "none",
+    "appSettings": {
+      "pollingInterval": 5,
+      "quotaNotificationThreshold": 1,
+      "showContext": true,
+      "showQuota": true,
+      "showResetCountdown": true,
+      "showAiCredits": true,
+      "showSpeed": false,
+      "showCacheHit": false,
+      "showSessionCost": false,
+      "tooltipDensity": "auto",
+      "showModelInternalId": false,
+      "maxRecentSteps": 100,
+      "maxArchives": 20,
+      "lockToMainAgent": false,
+      "appComposerRingEnabled": false,
+      "appTopBarEnabled": false,
+      "orchestratorPricingMode": "mapped",
+      "displayCurrency": "USD",
+      "customFxRate": null,
+      "subscriptionMonthlyFee": null,
+      "subscriptionCurrency": "USD",
+      "calendarRetentionDays": 400,
+      "autoCheckUpdates": true,
+      "showNativeHudBar": true,
+      "lastUpdateCheck": null,
+      "activityMaxRecentSteps": 100,
+      "activityMaxArchives": 20
+    }
+  },
+  "workspaces": {}
+}
