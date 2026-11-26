@@ -1,4 +1,4 @@
-// Obsidian Prism — Channel 7 Local Static/Dynamic Wallpaper Client Runtime (v1.0.8-beta.2 · Beta)
+// Obsidian Prism — Channel 7 Local Static/Dynamic Wallpaper Client Runtime (v1.0.8-beta.3 · Beta)
 // Decoupled from Channel 1 static bundle:
 // - Pure DOM construction (0 innerHTML), 5+1 anti-translation attributes, dedicated <style id="ag-prism-wallpaper-css">
 // - 0 :has() selectors, balanced braces, 0 style impact when wallpaper is disabled

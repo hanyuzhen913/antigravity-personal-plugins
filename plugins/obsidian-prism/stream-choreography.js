@@ -1,6 +1,7 @@
 // Obsidian Prism — Route Choreography, Velvet Stream Feathering, Auto-Unfold & Lens Module (stream-choreography.js)
 (function (root) {
   'use strict';
+  const M = Math;
   const G = root || (typeof globalThis !== 'undefined' ? globalThis : window);
   if (!G) return;
 
@@ -195,7 +196,7 @@
             fadeRaf = rAF(stepHighlightFade);
             if (!fadeRaf) clearHighlightFade();
           }
-        }, Math.max(8, Math.round(delay - 6)));
+        }, M.max(8, M.round(delay - 6)));
         return;
       }
       clearFadeTimer();
@@ -226,12 +227,12 @@
         const it = fadeItems[i];
         const tn = it.n;
         const val = tn ? tn.data ?? tn.nodeValue ?? '' : '';
-        const age = Math.max(0, now - it.t);
+        const age = M.max(0, now - it.t);
         if (!isConn(tn) || val.length < it.e || age >= STREAM_FADE_MS) {
           dropBucketItem(it);
           continue;
         }
-        const nb = Math.min(4, (age / STREAM_FADE_STEP_MS) | 0);
+        const nb = M.min(4, (age / STREAM_FADE_STEP_MS) | 0);
         if (it.b !== nb) {
           dropBucketItem(it);
           try {
@@ -326,7 +327,7 @@
         }
       });
       if (!isDestroyed() && expirableClasses.size > 0 && isFin(nextDue)) {
-        sweepTimer = ST(flushExpiredClasses, Math.max(16, Math.ceil(nextDue - Date.now())));
+        sweepTimer = ST(flushExpiredClasses, M.max(16, M.ceil(nextDue - Date.now())));
       }
     };
 
@@ -724,15 +725,15 @@
       const inputBox = qs(formalConv, '[data-testid="agent-input-box"]') || qs(d, '[data-testid="agent-input-box"]');
       if (inputBox && typeof motionEngine?.spring === 'function') {
         const nr = measuredRect || rectOf(inputBox);
-        const rawDelta = r && nr ? Math.round(r.top - nr.top) : -160;
+        const rawDelta = r && nr ? M.round(r.top - nr.top) : -160;
         const hostFade = Boolean(
           closestOf(inputBox, '.animate-fade-in, .no-transitions') ||
             closestOf(formalConv, '.no-transitions') ||
             clHas(formalConv, 'no-transitions')
         );
         const dy = hostFade
-          ? Math.max(-24, Math.min(0, rawDelta === 0 ? -10 : Math.round(rawDelta * 0.08)))
-          : Math.max(-420, Math.min(-24, rawDelta === 0 ? -140 : rawDelta));
+          ? M.max(-24, M.min(0, rawDelta === 0 ? -10 : M.round(rawDelta * 0.08)))
+          : M.max(-420, M.min(-24, rawDelta === 0 ? -140 : rawDelta));
         try {
           motionEngine.spring(
             inputBox,
@@ -809,7 +810,7 @@
 
     const scheduleRunningHoldExpiry = (delayMs) => {
       if (isDestroyed() || runHoldTimer) return;
-      const wait = Math.max(24, Math.min(SIDEBAR_RUN_HOLD_MS + 40, Math.ceil(delayMs) + 16));
+      const wait = M.max(24, M.min(SIDEBAR_RUN_HOLD_MS + 40, M.ceil(delayMs) + 16));
       runHoldTimer = ST(() => {
         runHoldTimer = 0;
         if (isDestroyed()) return;
@@ -829,7 +830,7 @@
               setAttrSafe(r, 'data-ag-cs-row-running', '1');
               continue;
             }
-            const lastAt = Math.max(cid ? runningCidMap.get(cid) || 0 : 0, runningRowMap.get(r) || 0);
+            const lastAt = M.max(cid ? runningCidMap.get(cid) || 0 : 0, runningRowMap.get(r) || 0);
             const rem = lastAt > 0 ? SIDEBAR_RUN_HOLD_MS - (now - lastAt) : -1;
             if (rem > 0) {
               if (rem < minRem) minRem = rem;
@@ -852,7 +853,7 @@
         if (cid) runningCidMap.set(cid, now);
         return true;
       }
-      const lastAt = Math.max(cid ? runningCidMap.get(cid) || 0 : 0, runningRowMap.get(row) || 0);
+      const lastAt = M.max(cid ? runningCidMap.get(cid) || 0 : 0, runningRowMap.get(row) || 0);
       if (lastAt > 0) {
         const elapsed = now - lastAt;
         if (elapsed >= 0 && elapsed <= SIDEBAR_RUN_HOLD_MS) {
@@ -870,7 +871,7 @@
       if (!row || !d || ga(d.documentElement, 'data-ag-cs-sidebar') === 'off') return false;
       const now = nowOf();
       const cid = getSidebarRowCid(row);
-      const heldAt = Math.max(cid ? runningCidMap.get(cid) || 0 : 0, runningRowMap.get(row) || 0);
+      const heldAt = M.max(cid ? runningCidMap.get(cid) || 0 : 0, runningRowMap.get(row) || 0);
       const isRun =
         ha(row, 'data-ag-cs-row-running') ||
         isSidebarRowRunning(row) ||
@@ -913,6 +914,7 @@
       }
       if (!selRow) return { e: false, i: -1, cid: '', r: null, rn: false, s: null, l: null, t: 0, st: states };
       const curCid = getSidebarRowCid(selRow);
+      if (sbInit && sbRect && (curCid && sbCid ? curCid === sbCid : selIdx === sbIndex)) return { e: false, i: selIdx, cid: curCid, r: selRow, rn: selRun, s: sbRect, st: states };
       const list = peOf(selRow);
       const rr = rectOf(selRow);
       const lr = rectOf(list);
@@ -1020,7 +1022,7 @@
           for (const vp of targets) {
             sa(vp, 'data-ag-cs-stage-glide', dir);
             const kids = vp.children ? AF(vp.children) : [];
-            const glideKids = kids.slice(Math.max(0, kids.length - 3));
+            const glideKids = kids.slice(M.max(0, kids.length - 3));
             for (const ch of glideKids) sa(ch, 'data-ag-cs-glide-item', dir);
             scheduleTransient(() => {
               if (isConn(vp) && ga(vp, 'data-ag-cs-stage-glide') === dir) ra(vp, 'data-ag-cs-stage-glide');
@@ -1197,7 +1199,7 @@
         if (navRoot) {
           const sibs = AF(qsa(navRoot, '[data-testid="conversation-navigator-turn"]'));
           const relIdx = sibs.indexOf(navTurn);
-          if (relIdx >= 0) idx = Math.min(turns.length - 1, Math.max(0, turns.length - sibs.length) + relIdx);
+          if (relIdx >= 0) idx = M.min(turns.length - 1, M.max(0, turns.length - sibs.length) + relIdx);
         }
       }
       const target = idx >= 0 && idx < turns.length ? turns[idx] : null;
@@ -1748,7 +1750,7 @@
       syncLensOverlayOrigins,
       scheduleDeferredConvEntry,
       suppressEntryMotion(ms) {
-        suppressEntryMotionUntil = Math.max(suppressEntryMotionUntil, nowOf() + Math.max(120, Number(ms) || 900));
+        suppressEntryMotionUntil = M.max(suppressEntryMotionUntil, nowOf() + M.max(120, Number(ms) || 900));
         liftoffBubbleUntil = 0;
         const d = docOf();
         if (d) for (const n of qsa(d, '.ag-cs-liftoff-veil,.ag-cs-sidebar-glide-pill')) n.remove();

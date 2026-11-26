@@ -3,7 +3,7 @@
  *
  * 设计与风控红线（100% 零 Google 风控）：
  *   1. 仅读写操作系统标准「用户级」环境变量 GOMEMLIMIT（Go 1.19+ 运行时原生支持的软内存上限）；
- *   2. 严禁修改任何 Antigravity 官方二进制、app.asar 或强行向运行中进程注入参数；
+ *   2. 严禁修改任何 Antigravity 官方二进制、官方资源包或强行向运行中进程注入参数；
  *   3. 严格白名单值校验，绝不接受任意表达式或命令注入；
  *   4. 所有操作显式由用户触发，重启 Antigravity 后生效，随时可一键撤销清理。
  */
@@ -18,27 +18,31 @@ export const ALLOWED_GOMEMLIMIT_PRESETS = Object.freeze(['2GiB', '2500MiB', '3Gi
 export const RECOMMENDED_GOMEMLIMIT = '2GiB';
 const GOMEMLIMIT_VALUE_RE = /^(?:1536MiB|2GiB|2500MiB|3GiB|4GiB)$/;
 const MAC_LAUNCH_AGENT_LABEL = 'com.obsidian-prism.gomemlimit';
-
-const WIN_GET_USER_ENV_PS =
-  '$v = [Environment]::GetEnvironmentVariable("GOMEMLIMIT", "User"); if ($null -ne $v) { [Console]::Out.Write($v) }';
-const WIN_GET_USER_ENV_B64 = Buffer.from(WIN_GET_USER_ENV_PS, 'utf16le').toString('base64');
-
-const WIN_SET_USER_ENV_PS = [
-  '$ErrorActionPreference = "Stop"',
-  '$v = [string]$env:AG_PRISM_GOMEMLIMIT_VAL',
-  'if ($v -notmatch "^(1536MiB|2GiB|2500MiB|3GiB|4GiB)$") { throw "Invalid GOMEMLIMIT value" }',
-  '[Environment]::SetEnvironmentVariable("GOMEMLIMIT", $v, "User")',
-].join('\n');
-const WIN_SET_USER_ENV_B64 = Buffer.from(WIN_SET_USER_ENV_PS, 'utf16le').toString('base64');
-
-const WIN_CLEAR_USER_ENV_PS = [
-  '$ErrorActionPreference = "Stop"',
-  '[Environment]::SetEnvironmentVariable("GOMEMLIMIT", $null, "User")',
-].join('\n');
-const WIN_CLEAR_USER_ENV_B64 = Buffer.from(WIN_CLEAR_USER_ENV_PS, 'utf16le').toString('base64');
+const WIN_ENV_REG_KEY = 'HKCU\\Environment';
 
 export function isValidGoMemLimitValue(raw) {
   return typeof raw === 'string' && GOMEMLIMIT_VALUE_RE.test(raw.trim());
+}
+
+export function parseWindowsRegQueryValue(output, valueName = 'GOMEMLIMIT') {
+  const escaped = String(valueName || 'GOMEMLIMIT').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`^\\s*${escaped}\\s+REG_(?:EXPAND_)?SZ\\s+(.+?)\\s*$`, 'im');
+  for (const rawLine of String(output || '').split(/\r?\n/)) {
+    const m = re.exec(rawLine);
+    if (m && m[1]) return m[1].trim();
+  }
+  return '';
+}
+
+function isWindowsRegNotFoundError(err) {
+  const msg = String(err?.message || err || '');
+  if (/access is denied|拒绝访问|permission denied|ENOENT|EACCES|EPERM/i.test(msg)) {
+    return false;
+  }
+  if (/unable to find|cannot find|not found|找不到|見つかりません|찾을 수 없|no se encontr|introuvable|nicht gefunden/i.test(msg)) {
+    return true;
+  }
+  return Number(err?.code) === 1;
 }
 
 function defaultExecFileAsync(file, args, options = {}) {
@@ -46,7 +50,9 @@ function defaultExecFileAsync(file, args, options = {}) {
     execFile(file, args, options, (err, stdout, stderr) => {
       if (err) {
         const msg = String(stderr || err.message || 'command failed').trim();
-        reject(new Error(msg));
+        const wrapped = new Error(msg);
+        if (err.code !== undefined) wrapped.code = err.code;
+        reject(wrapped);
         return;
       }
       resolve(String(stdout || ''));
@@ -158,13 +164,18 @@ export async function getGoMemLimitStatus({
 
   try {
     if (platform === 'win32') {
-      const out = await execAsync(
-        'powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', WIN_GET_USER_ENV_B64],
-        { encoding: 'utf8', windowsHide: true, timeout: 5000 }
-      );
-      currentValue = String(out || '').trim();
-      if (currentValue) source = 'win-user-env';
+      try {
+        const out = await execAsync(
+          'reg.exe',
+          ['query', WIN_ENV_REG_KEY, '/v', 'GOMEMLIMIT'],
+          { encoding: 'utf8', windowsHide: true, timeout: 5000 }
+        );
+        currentValue = parseWindowsRegQueryValue(out, 'GOMEMLIMIT');
+        if (currentValue) source = 'win-user-env';
+      } catch (err) {
+        if (!isWindowsRegNotFoundError(err)) throw err;
+        currentValue = '';
+      }
     } else if (platform === 'darwin') {
       try {
         const out = await execAsync('/bin/launchctl', ['getenv', 'GOMEMLIMIT'], { encoding: 'utf8', timeout: 4000 });
@@ -239,13 +250,13 @@ export async function setGoMemLimit(rawValue, opts = {}) {
   try {
     if (platform === 'win32') {
       await execAsync(
-        'powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', WIN_SET_USER_ENV_B64],
+        'reg.exe',
+        ['add', WIN_ENV_REG_KEY, '/v', 'GOMEMLIMIT', '/t', 'REG_SZ', '/d', value, '/f'],
         {
           encoding: 'utf8',
           windowsHide: true,
           timeout: 12000,
-          env: { ...env, AG_PRISM_GOMEMLIMIT_VAL: value },
+          env,
         }
       );
     } else if (platform === 'darwin') {
@@ -280,11 +291,15 @@ export async function clearGoMemLimit(opts = {}) {
 
   try {
     if (platform === 'win32') {
-      await execAsync(
-        'powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', WIN_CLEAR_USER_ENV_B64],
-        { encoding: 'utf8', windowsHide: true, timeout: 12000, env }
-      );
+      try {
+        await execAsync(
+          'reg.exe',
+          ['delete', WIN_ENV_REG_KEY, '/v', 'GOMEMLIMIT', '/f'],
+          { encoding: 'utf8', windowsHide: true, timeout: 12000, env }
+        );
+      } catch (err) {
+        if (!isWindowsRegNotFoundError(err)) throw err;
+      }
     } else if (platform === 'darwin') {
       try {
         await execAsync('/bin/launchctl', ['unsetenv', 'GOMEMLIMIT'], { encoding: 'utf8', timeout: 5000 });

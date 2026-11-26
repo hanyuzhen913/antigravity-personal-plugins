@@ -1,6 +1,7 @@
 // Obsidian Prism — Home & Conversation Interactive ASCII Matrix & Silk Skimmer Ripple Host (home-ripple-host.js)
 (function (root) {
   'use strict';
+  const M = Math;
   const G = root || (typeof globalThis !== 'undefined' ? globalThis : window);
   if (!G) return;
 
@@ -26,7 +27,7 @@
   const hasHole = (e) => ga(e, HOLE_A) === 'true' || ga(e, DHOLE_A) === 'true';
   const docOf = () => (typeof document !== 'undefined' ? document : null);
   const nowOf = () => performance.now();
-  const cl = (v, a, b) => Math.max(a, Math.min(b, v));
+  const cl = (v, a, b) => M.max(a, M.min(b, v));
   const cAF = (id) => { if (id && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(id); return 0; };
   const rAF = (fn) => (typeof requestAnimationFrame === 'function' ? requestAnimationFrame(fn) : 0);
   const parseAmb = (r) => G.__agPrismRipple?.parseAmbientScale ? G.__agPrismRipple.parseAmbientScale(r) : r == null || r === '' ? 1 : cl(Number(r) > 1 ? Number(r) / 100 : Number.isFinite(Number(r)) ? Number(r) : 1, 0, 1);
@@ -160,7 +161,8 @@
       const c = mode === 'conv';
       const cp = c ? C_P[lv] || C_P.medium : null;
       const radius = cp ? cp[7] : 230;
-      const on = Boolean(aSt?.active && !motionReduced() && amb > 0.001);
+      const fd = aSt?.f ?? 1;
+      const on = Boolean(aSt?.active && fd > 0.005 && !motionReduced() && amb > 0.001);
       const baseP = sp === 'mono' ? 0.45 : 1;
       return {
         ink: t.ink,
@@ -175,7 +177,7 @@
         ambientIntensity: amb,
         spectrum: sp,
         nebula: amb <= 0.001 ? false : undefined,
-        aura: on ? { x: aSt.x, y: aSt.y, radius, strength: amb * (cp ? cp[3] : 1), active: true } : { x: 0, y: 0, radius, strength: 0, active: false },
+        aura: on ? { x: aSt.x, y: aSt.y, radius, strength: amb * (cp ? cp[3] : 1) * fd, active: true } : { x: 0, y: 0, radius, strength: 0, active: false },
         auraPhase: (now || 0) * (cp ? 0.00045 + 0.00015 * cp[3] : 0.0006),
       };
     }
@@ -327,9 +329,7 @@
       let pw = 0;
       let ph = 0;
       let shrunk = false;
-      let fLost = false;
-      let gLost = false;
-      let recTries = 0;
+      let fLost = false, gLost = false, recTries = 0, aT = null, wSlp = 0, aWk = 0;
 
       const state = {
         mode,
@@ -390,7 +390,7 @@
       function mountGlow(p2d, sw) {
         if (!state.glowCanvas) return;
         if (sw) { try { state.glow?.dispose?.(true); } catch {} state.glowCanvas = swapCv(state.glowCanvas, G_CLS, G_TID, 1); }
-        const mk = (u) => (hasG ? rippleCore.mountBrandHorizonGlow(state.glowCanvas, { prefer2D: !!u, onContextLost: () => onLost(0) }) : { mode: 'none', resize() {}, draw() {}, dispose() {} });
+        const mk = (u) => (hasG ? rippleCore.mountBrandHorizonGlow(state.glowCanvas, { prefer2D: !!u, width: 0, height: 0, onContextLost: () => onLost(0) }) : { mode: 'none', resize() {}, draw() {}, dispose() {} });
         let g = mk(p2d);
         if (hasG && g?.mode === 'none' && !p2d) {
           try { g.dispose?.(true); } catch {}
@@ -427,7 +427,7 @@
         const p2d = ++recTries >= 2;
         if (nf && state.width > 0 && state.height > 0) {
           try { state.field?.dispose?.(true); } catch {}
-          state.field = mountField(Math.ceil(state.width / rippleCore.RIPPLE.cellWidth), Math.ceil(state.height / rippleCore.RIPPLE.cellHeight), p2d, 1);
+          state.field = mountField(M.ceil(state.width / rippleCore.RIPPLE.cellWidth), M.ceil(state.height / rippleCore.RIPPLE.cellHeight), p2d, 1);
           tok = sampleTok(canvas);
           cRect = null;
           updateCalm();
@@ -469,8 +469,8 @@
         if (!cur || (hasG && state.glow?.mode === 'none')) return;
         state.glow?.resize?.(w, h, 0.6);
         if (!cur.width || !cur.height) {
-          cur.width = Math.max(1, Math.round(w * 0.6));
-          cur.height = Math.max(1, Math.round(h * 0.6));
+          cur.width = M.max(1, M.round(w * 0.6));
+          cur.height = M.max(1, M.round(h * 0.6));
         }
       }
 
@@ -501,9 +501,9 @@
         const cur = state.root;
         if (!cur) return;
         if (d.hidden) return reclaim();
-        const w = Math.max(0, Number(cur.clientWidth) || 0);
-        const h = Math.max(0, Number(cur.clientHeight) || 0);
-        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const w = M.max(0, Number(cur.clientWidth) || 0);
+        const h = M.max(0, Number(cur.clientHeight) || 0);
+        const dpr = M.min(window.devicePixelRatio || 1, 2);
         const gc = state.glowCanvas;
         const lostF = fLost || isLost(canvas, state.field);
         if (w === state.width && h === state.height && dpr === state.dpr && !lostF) {
@@ -520,14 +520,14 @@
         }
         const cw = rippleCore.RIPPLE.cellWidth;
         const ch = rippleCore.RIPPLE.cellHeight;
-        const cols = Math.ceil(w / cw);
-        const rows = Math.ceil(h / ch);
+        const cols = M.ceil(w / cw);
+        const rows = M.ceil(h / ch);
         const was2d = state.field?.mode === '2d';
         state.width = w;
         state.height = h;
         state.dpr = dpr;
-        pw = Math.round(cols * cw * dpr);
-        ph = Math.round(rows * ch * dpr);
+        pw = M.round(cols * cw * dpr);
+        ph = M.round(rows * ch * dpr);
         shrunk = drawn = false;
         force1 = true;
         state.field.dispose(true);
@@ -542,6 +542,7 @@
       function enterIdleSleep() {
         stopTimers(state);
         wanted = false;
+        wSlp = 1;
         state.sleeping = true;
         setAttrIfChanged(host, 'data-ripple-sleep', '1');
       }
@@ -580,21 +581,24 @@
         const still = motionReduced() || streaming;
         const vsDt = lastTs > 0 && now > lastTs ? now - lastTs : now - lastDraw;
         lastTs = now;
-        const rawGap = Math.max(0, Number(getMinFrameGapMs?.() ?? 0) || 0);
+        const rawGap = M.max(0, Number(getMinFrameGapMs?.() ?? 0) || 0);
         const minGap =
-          (state.mode === 'home' || state.convLevel === 'full') && (state.waves?.active?.() || (auraState.active && lsa > 0 && now - lsa < 180) || (tideAt > 0 && now - tideAt < 480))
+          (state.mode === 'home' || state.convLevel === 'full') && (state.waves?.active?.() || (auraState.active && lsa > 0 && now - lsa < 650) || (tideAt > 0 && now - tideAt < 480))
             ? rawGap
-            : Math.max(33, rawGap);
+            : M.max(33, rawGap);
         if (!still && drawn && !force1 && minGap > 0 && lastDraw > 0 && now - lastDraw < minGap && !hP()) {
           const rem = minGap - (now - lastDraw);
-          if (typeof setTimeout === 'function' && rem > Math.max(8, vsDt + 2)) {
+          if (typeof setTimeout === 'function' && rem > M.max(8, vsDt + 2)) {
             if (timer) clearTimeout(timer);
-            timer = setTimeout(() => { timer = 0; wake(); }, Math.max(4, Math.ceil(rem)));
+            timer = setTimeout(() => { timer = 0; wake(); }, M.max(4, M.ceil(rem)));
           } else wake();
           return;
         }
         lastDraw = now;
-        state.waves.advance(still ? 0 : cl((now - prev) / 1000, 0, 0.05));
+        const dtMs = still ? 0 : wSlp ? M.min(16, M.max(0, now - prev)) : cl(now - prev, 0, 50);
+        aT = aT === null ? now : aT + dtMs;
+        wSlp = 0;
+        state.waves.advance(still ? 0 : cl(dtMs / 1000, 0, 0.05));
         prev = now;
         const te = state.mode === 'home' && tideAt > 0 ? now - tideAt : -1;
         const inT = !still && te >= 0 && te < 480;
@@ -604,32 +608,41 @@
           state.aura.strength = 1.0;
           force1 = true;
         } else if (inT) {
-          const ease = 1 - Math.pow(1 - cl(te / 480, 0, 1), 2.2);
+          const ease = 1 - M.pow(1 - cl(te / 480, 0, 1), 2.2);
           state.aura.reach = +(0.2 + 0.27 * ease).toFixed(4);
           state.aura.strength = +(0.32 + 0.68 * ease).toFixed(4);
         }
 
         const amb = ambScale();
         if (amb <= 0.001 && auraState.active) auraState.active = false;
+        let aSet = 0;
+        if (!streaming && amb > 0.001 && auraState.active && lsa > 0) {
+          const age = M.max(0, now - lsa);
+          if (age >= IDLE_MS) { auraState.active = false; auraState.f = 0; aSet = 1; }
+          else {
+            const u = age <= 750 ? 1 : (IDLE_MS - age) / 450;
+            auraState.f = u * u * (3 - 2 * u) * (aWk && now - aWk < 180 ? cl((now - aWk) / 180, 0.12, 1) : 1);
+          }
+        }
         const aRec = !streaming && amb > 0.001 && auraState.active && lsa > 0 && now - lsa < IDLE_MS;
         const inI = state.mode === 'home' && !still && amb > 0.001 && now - mountedAt < INTRO_MS;
         const busy = !streaming && Boolean(state.field?.busy?.());
-        const need = force1 || !drawn || (Boolean(state.glowCanvas) && amb <= 0.001 && !gZero) || inT || inI || aRec || (!streaming && Boolean(state.field?.needsDraw(now, still)));
+        const need = force1 || !drawn || aSet || (Boolean(state.glowCanvas) && amb <= 0.001 && !gZero) || inT || inI || aRec || (!streaming && Boolean(state.field?.needsDraw(aT, still)));
 
         if (hasSz(canvas) && need) {
           force1 = false;
           if (!tok) tok = sampleTok(canvas);
           const sp = specMode(tok.dark);
-          const pal = buildPal(tok, auraState, now, amb, sp, state.mode, state.convLevel);
+          const pal = buildPal(tok, auraState, aT, amb, sp, state.mode, state.convLevel);
           if (hasSz(state.glowCanvas)) {
             if (amb <= 0.001) {
               if (!gZero) { state.glow?.clear?.(); gZero = true; }
             } else {
               gZero = false;
-              state.glow?.draw?.(now, { dark: pal.dark, still, strength: inT ? state.aura.strength : 1, reach: state.aura.reach, ambientIntensity: amb, spectrum: sp });
+              state.glow?.draw?.(aT, { dark: pal.dark, still, strength: inT ? state.aura.strength : 1, reach: state.aura.reach, ambientIntensity: amb, spectrum: sp });
             }
           }
-          state.field.draw(now, pal, still);
+          state.field.draw(aT, pal, still);
           drawn = true;
         }
 
@@ -650,6 +663,8 @@
         fLost = gLost = false;
         recTries = 0;
         prev = nowOf();
+        wSlp = 1;
+        aWk = 0;
         wanted = false;
         force1 = true;
         auraState.active = false;
@@ -696,15 +711,15 @@
         }
         const now = nowOf();
         if (lx !== null && ly !== null) {
-          const dist = Math.hypot(x - lx, y - ly);
-          const spd = dist / Math.max(0.004, (now - lsa) / 1000);
+          const dist = M.hypot(x - lx, y - ly);
+          const spd = dist / M.max(0.004, (now - lsa) / 1000);
           const ms = cp ? cp[5] : 220;
           const cs = cp ? cp[6] : 42;
           if (spd >= ms) {
             carry += dist;
             if (carry >= cs) {
-              carry = Math.min(20, carry - cs);
-              state.waves.skimmer?.(Math.floor(x / rippleCore.RIPPLE.cellWidth), Math.floor(y / rippleCore.RIPPLE.cellHeight), cl((spd - ms) / 1800, 0.05, 1) * (cp ? cp[3] : 1));
+              carry = M.min(20, carry - cs);
+              state.waves.skimmer?.(M.floor(x / rippleCore.RIPPLE.cellWidth), M.floor(y / rippleCore.RIPPLE.cellHeight), cl((spd - ms) / 1800, 0.05, 1) * (cp ? cp[3] : 1));
             }
           } else carry *= 0.85;
         }
@@ -712,6 +727,7 @@
         ly = y;
         lsa = now;
         if (ambScale() > 0.001) {
+          if (!auraState.active || state.sleeping) aWk = now;
           auraState.x = x;
           auraState.y = y;
           auraState.active = true;
@@ -741,8 +757,8 @@
         cRectAt = nowOf();
         if (state.sleeping) prev = cRectAt;
         state.waves.disturb(
-          Math.floor((ev.clientX - r.left) / rippleCore.RIPPLE.cellWidth),
-          Math.floor((ev.clientY - r.top) / rippleCore.RIPPLE.cellHeight),
+          M.floor((ev.clientX - r.left) / rippleCore.RIPPLE.cellWidth),
+          M.floor((ev.clientY - r.top) / rippleCore.RIPPLE.cellHeight),
           cp && state.convLevel !== 'full' ? { amplitudeScale: cp[3], radiusScale: 0.72 + 0.28 * cp[3], duration: cp[9], loadWeight: cp[10] } : undefined
         );
         state.field.invalidate();

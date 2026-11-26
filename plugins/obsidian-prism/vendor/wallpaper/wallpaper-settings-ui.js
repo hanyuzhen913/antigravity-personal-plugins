@@ -1,4 +1,4 @@
-// Obsidian Prism — Channel 7 Local Static/Dynamic Wallpaper Settings Card UI (v1.0.8-beta.2 · Beta, Five-Locale, 0 innerHTML)
+// Obsidian Prism — Channel 7 Local Static/Dynamic Wallpaper Settings Card UI (v1.0.8-beta.3 · Beta, Five-Locale, 0 innerHTML)
 // Exposes globalThis.__prismMountWallpaperUi(slotEl, ctx) and window.__prismMountWallpaperUi(slotEl, ctx)
 
 (function (root) {

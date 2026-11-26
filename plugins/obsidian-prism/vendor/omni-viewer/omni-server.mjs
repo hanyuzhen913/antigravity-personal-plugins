@@ -8,7 +8,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-export const OMNI_VERSION = '1.0.8-beta.2';
+export const OMNI_VERSION = '1.0.8-beta.3';
 export const OMNI_BINDING = '__agPrismOmniCall';
 
 const MAX_TEXT_SLICE_BYTES = 2 * 1024 * 1024;

@@ -14,7 +14,131 @@
   }
 
   const STUDIO_HEAD_CSS = '.ag-cs-home-panel-head{flex-wrap:wrap;row-gap:8px}';
-  const STUDIO_EXTRA_CSS = STUDIO_HEAD_CSS + '.ag-cs-home-tab,.ag-cs-home-range{white-space:nowrap}.ag-cs-home-ws-select{color-scheme:inherit}.ag-cs-home-ws-select option{background:var(--card,#141418);color:var(--foreground,#F2F2F5);}.agy-home{--_a:var(--ag-cs-accent);--_b:1px solid var(--_kb)}.ag-cs-hs-tg,.ag-cs-home-local-note{font-size:11px}.ag-cs-hs-tg{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 8px;border:var(--_b);border-radius:6px;background:var(--_tb);color:var(--foreground);font-family:inherit;font-weight:500;white-space:nowrap;cursor:pointer;&:hover{background:var(--ag-cs-hover-wash)}&[aria-pressed="true"]{color:var(--_a);border-color:color-mix(in srgb,currentColor 32%,#0000);background:color-mix(in srgb,currentColor 11%,#0000)}& svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}}:is(.ag-cs-home-ws-select,.ag-cs-hs-tg,.ag-cs-quota-refresh):focus-visible{outline:2px solid var(--_a);outline-offset:1px}.ag-cs-home-local-note{line-height:1.4;color:var(--muted-foreground);opacity:.86;padding-top:8px;border-top:var(--_b)}';
+  const STUDIO_MODEL_COLOR_CSS = 'html :is(.ag-cs-home-chart-seg,.ag-cs-home-model-swatch)[data-ag-mc]{background-color:var(--_mc-d);}html[data-ag-cs-theme="light"] :is(.ag-cs-home-chart-seg,.ag-cs-home-model-swatch)[data-ag-mc],html>body:is(.theme-light,.light-theme,.light) :is(.ag-cs-home-chart-seg,.ag-cs-home-model-swatch)[data-ag-mc]{background-color:var(--_mc-l);}';
+  const STUDIO_EXTRA_CSS = STUDIO_HEAD_CSS + '.ag-cs-home-tab,.ag-cs-home-range{white-space:nowrap}.ag-cs-home-ws-select{color-scheme:inherit}.ag-cs-home-ws-select option{background:var(--card,#141418);color:var(--foreground,#F2F2F5);}.agy-home{--_a:var(--ag-cs-accent);--_b:1px solid var(--_kb)}.ag-cs-hs-tg,.ag-cs-home-local-note{font-size:11px}.ag-cs-hs-tg{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 8px;border:var(--_b);border-radius:6px;background:var(--_tb);color:var(--foreground);font-family:inherit;font-weight:500;white-space:nowrap;cursor:pointer;&:hover{background:var(--ag-cs-hover-wash)}&[aria-pressed="true"]{color:var(--_a);border-color:color-mix(in srgb,currentColor 32%,#0000);background:color-mix(in srgb,currentColor 11%,#0000)}& svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}}:is(.ag-cs-home-ws-select,.ag-cs-hs-tg,.ag-cs-quota-refresh):focus-visible{outline:2px solid var(--_a);outline-offset:1px}.ag-cs-home-local-note{line-height:1.4;color:var(--muted-foreground);opacity:.86;padding-top:8px;border-top:var(--_b)}' + STUDIO_MODEL_COLOR_CSS;
+
+  // 高区分度双主题模型阵营子色板（每项为 [深色hex, 浅色hex]），避免同阵营模型落入近似蓝/重复索引
+  const MODEL_CAMP_PALETTES = {
+    gemini: [
+      ['#4F8BFF', '#2563EB'], // 钴蓝
+      ['#22D3EE', '#0891B2'], // 电光青
+      ['#818CF8', '#4F46E5'], // 靛紫蓝
+      ['#2DD4BF', '#0D9488'], // 碧水青绿
+      ['#93C5FD', '#1E40AF'], // 冰蓝 / 深海蓝
+    ],
+    claude: [
+      ['#F59E0B', '#D97706'], // 琥珀金
+      ['#FB7185', '#E11D48'], // 珊瑚玫红
+      ['#F97316', '#C2410C'], // 暖橘橙
+      ['#FBBF24', '#B45309'], // 蜂蜜金黄
+      ['#F43F5E', '#BE123C'], // 绯红
+    ],
+    gpt: [
+      ['#34D399', '#059669'], // 翠绿薄荷
+      ['#A3E635', '#65A30D'], // 鲜柠绿
+      ['#4ADE80', '#16A34A'], // 草叶绿
+      ['#5EEAD4', '#0F766E'], // 海沫玉绿
+    ],
+    deepseek: [
+      ['#A78BFA', '#7C3AED'], // 电光紫
+      ['#E879F9', '#C026D3'], // 兰花洋红
+      ['#C084FC', '#9333EA'], // 紫水晶
+      ['#F472B6', '#DB2777'], // 亮粉紫
+    ],
+  };
+  const MODEL_OVERFLOW_PALETTE = [
+    ['#38BDF8', '#0284C7'],
+    ['#EC4899', '#BE185D'],
+    ['#84CC16', '#4D7C0F'],
+    ['#FB923C', '#EA580C'],
+    ['#C4B5FD', '#6D28D9'],
+    ['#FACC15', '#CA8A04'],
+    ['#14B8A6', '#115E59'],
+    ['#94A3B8', '#475569'],
+  ];
+  const MODEL_ALL_FALLBACKS = [
+    ...MODEL_OVERFLOW_PALETTE,
+    ...MODEL_CAMP_PALETTES.gemini,
+    ...MODEL_CAMP_PALETTES.claude,
+    ...MODEL_CAMP_PALETTES.gpt,
+    ...MODEL_CAMP_PALETTES.deepseek,
+  ];
+  const detectModelCamp = (id) => {
+    const s = String(id || '').toLowerCase();
+    if (/gemini|palm|bard/.test(s)) return 'gemini';
+    if (/claude|anthropic|opus|sonnet|haiku/.test(s)) return 'claude';
+    if (/gpt|openai|codex|chatgpt|\bo[134](?:-|\b)/.test(s)) return 'gpt';
+    if (/deepseek/.test(s)) return 'deepseek';
+    return 'other';
+  };
+  const hslToHex = (hDeg, sPct, lPct) => {
+    const h = (((hDeg % 360) + 360) % 360) / 360;
+    const s = sPct / 100;
+    const l = lPct / 100;
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    const ch = (t) => {
+      const k = t < 0 ? t + 1 : t > 1 ? t - 1 : t;
+      const v = k < 1 / 6 ? p + (q - p) * 6 * k : k < 0.5 ? q : k < 2 / 3 ? p + (q - p) * (2 / 3 - k) * 6 : p;
+      return Math.round(v * 255).toString(16).padStart(2, '0').toUpperCase();
+    };
+    return '#' + ch(h + 1 / 3) + ch(h) + ch(h - 1 / 3);
+  };
+  const fnv1aHash = (str) => {
+    let h = 2166136261;
+    for (let i = 0; i < str.length; i++) h = Math.imul(h ^ str.charCodeAt(i), 16777619);
+    return h >>> 0;
+  };
+  function resolveHomeModelColours(ids, fallbackIndices) {
+    const uniqueIds = Array.from(new Set((Array.isArray(ids) ? ids : []).filter(Boolean))).sort();
+    const usedDark = new Set();
+    const usedLight = new Set();
+    const out = {};
+    let seqIdx = 0;
+    for (const id of uniqueIds) {
+      const camp = detectModelCamp(id);
+      const campPool = MODEL_CAMP_PALETTES[camp] || [];
+      const candidates = [...campPool, ...MODEL_ALL_FALLBACKS];
+      let picked = null;
+      for (const pair of candidates) {
+        if (!usedDark.has(pair[0]) && !usedLight.has(pair[1])) { picked = pair; break; }
+      }
+      if (!picked) {
+        const baseHue = fnv1aHash(id) % 360;
+        for (let step = 0; step < 360; step++) {
+          const hue = (baseHue + step * 137.508) % 360;
+          const dHex = hslToHex(hue, 76, step % 2 === 0 ? 64 : 54);
+          const lHex = hslToHex(hue, 72, step % 2 === 0 ? 42 : 34);
+          if (!usedDark.has(dHex) && !usedLight.has(lHex)) { picked = [dHex, lHex]; break; }
+        }
+      }
+      usedDark.add(picked[0]);
+      usedLight.add(picked[1]);
+      const baseIdx = fallbackIndices && Number.isInteger(fallbackIndices[id]) ? fallbackIndices[id] : seqIdx % 10;
+      out[id] = { idx: baseIdx, dark: picked[0], light: picked[1], camp };
+      seqIdx += 1;
+    }
+    return out;
+  }
+  const isLightHomeTheme = (d) => {
+    if (d?.documentElement?.getAttribute?.('data-ag-cs-theme') === 'light') return true;
+    const cls = String(d?.body?.className || '');
+    return /(?:^|\s)(?:theme-light|light-theme|light)(?:\s|$)/.test(cls);
+  };
+  const applyModelSwatchColor = (el, spec, lightNow) => {
+    if (!el || !spec) return el;
+    el.setAttribute('data-color', String(spec.idx ?? 0));
+    el.setAttribute('data-ag-mc', lightNow ? spec.light : spec.dark);
+    if (el.style) {
+      if (isFn(el.style.setProperty)) {
+        el.style.setProperty('--_mc-d', spec.dark);
+        el.style.setProperty('--_mc-l', spec.light);
+      } else {
+        el.style.background = lightNow ? spec.light : spec.dark;
+      }
+    }
+    return el;
+  };
 
   const REMOTE_TITLE_RE = /\[(SSH|WSL|Dev Container|Codespaces|Tunnel|Remote):\s*([^\]]+)\]/i;
   const decUri = (v) => { const s = String(v || '').trim(); if (!s) return ''; try { return decodeURIComponent(s); } catch { return s; } };
@@ -852,7 +976,9 @@ de|Subagenten|Token||Ein|Aus|Wenig Kontingent|Wird knapp|Reichlich|Was steht als
           const columns = data.modelDays || [];
           const fmt = usageCore.homeShortDateFormat(lang);
           for (const col of columns) for (const id of Object.keys(col.models || {})) ids.push(id);
-          const colours = modelColours(ids);
+          const baseColours = modelColours(ids);
+          const colourSpecs = resolveHomeModelColours(ids, baseColours);
+          const lightNow = isLightHomeTheme(d);
 
           if (columns.length > 0) {
             let peak = 0;
@@ -879,7 +1005,7 @@ de|Subagenten|Token||Ein|Aus|Wenig Kontingent|Wird knapp|Reichlich|Was steht als
               colEl.title = `${usageCore.homeShortDate(fmt, col.date)} · ${fmtTok(dayTotal)}`;
               colEl.style.height = `${top > 0 ? (dayTotal / top) * 100 : 0}%`;
               for (const [mId, tok] of Object.entries(col.models).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
-                const seg = sp(cC + 'seg', { 'data-color': String(colours[mId] ?? 0) });
+                const seg = applyModelSwatchColor(sp(cC + 'seg'), colourSpecs[mId] || { idx: baseColours[mId] ?? 0, dark: '#4F8BFF', light: '#2563EB' }, lightNow);
                 seg.style.height = `${dayTotal > 0 ? (tok / dayTotal) * 100 : 0}%`;
                 ap(colEl, seg);
               }
@@ -936,7 +1062,7 @@ de|Subagenten|Token||Ein|Aus|Wenig Kontingent|Wird knapp|Reichlich|Was steht als
             row.title = `${m.id} · ${m.sessions} ${ui.sessionsUnit || 'sessions'}${subShare}`;
             const inp = (m.input || 0) + (m.cacheRead || 0) + (m.cacheWrite || 0);
             const cacheTag = isFin(m.cacheHitRate) ? ` · ${Math.round(m.cacheHitRate * 100)}% ${ui.cacheShort || 'Cache'}` : '';
-            ap(listEl, ap(row, sp(mC + '-swatch', { 'data-color': String(colours[m.id] ?? 0) }), sp(mC + '-name', m.id), sp(mC + '-split', `${fmtTok(inp)} ${inUnit} · ${fmtTok(m.output || 0)} ${outUnit}${cacheTag}`), sp(mC + '-share', totalAll > 0 ? (Math.round((m.tokens / totalAll) * 1000) / 10).toFixed(1) + '%' : '—')));
+            ap(listEl, ap(row, applyModelSwatchColor(sp(mC + '-swatch'), colourSpecs[m.id] || { idx: baseColours[m.id] ?? 0, dark: '#4F8BFF', light: '#2563EB' }, lightNow), sp(mC + '-name', m.id), sp(mC + '-split', `${fmtTok(inp)} ${inUnit} · ${fmtTok(m.output || 0)} ${outUnit}${cacheTag}`), sp(mC + '-share', totalAll > 0 ? (Math.round((m.tokens / totalAll) * 1000) / 10).toFixed(1) + '%' : '—')));
           }
           if (models.length > rowCap) {
             const hc = models.length - shown.length;
@@ -978,7 +1104,7 @@ de|Subagenten|Token||Ein|Aus|Wenig Kontingent|Wird knapp|Reichlich|Was steht als
     };
   }
 
-  const api = { createHomeStudioPanelController, hasPersistedTokens };
+  const api = { createHomeStudioPanelController, hasPersistedTokens, resolveHomeModelColours };
   if (typeof module === 'object' && module.exports) module.exports = api;
   G.__agPrismHomeStudioPanel = api;
   G.__agHomeStudioPanel = api;

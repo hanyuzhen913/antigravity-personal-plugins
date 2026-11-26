@@ -1,7 +1,7 @@
 // Obsidian Prism Native Sidecar Daemon (sidecars/daemon/main.mjs)
 // - Auto-discovers DevToolsActivePort across Windows/macOS/Linux + fast Target.setDiscoverTargets push
 // - Registers Page.addScriptToEvaluateOnNewDocument + Runtime.evaluate (survives Ctrl+Shift+R reloads with zero app.asar touch!)
-// - Hot-upgrades legacy instances to Obsidian Prism v1.0.8-beta.2
+// - Hot-upgrades legacy instances to Obsidian Prism v1.0.8-beta.3
 // - Lazily serves real MetricsStore + DesktopUsage snapshots over __agPrismMetricsCall only when requested (0 idle CPU)
 // - Registers __agPrismRepoCall (paired with window.__agPrismRepoBridge) for live Git status & safe git pull --ff-only + hot-reload!
 
@@ -28,6 +28,9 @@ import { AddonRegistry, isLabEnabled as isAddonsLabEnabled } from './addon-regis
 import { getGoMemLimitStatus, setGoMemLimit, clearGoMemLimit } from './gomemlimit-service.mjs';
 import { buildStorageGuardBannerExpression, buildStorageGuardDismissExpression } from './storage-guard-ui.mjs';
 import * as conversationArchive from './conversation-archive.mjs';
+import { sanitizeSecretText } from './redact.mjs';
+
+export { sanitizeSecretText };
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
@@ -304,17 +307,6 @@ function execGit(args, cwd, timeoutMs = 12000, extraConfigs = []) {
       }
     );
   });
-}
-
-const SECRET_TOKEN_RE =
-  /(sk-[A-Za-z0-9_\-]{6,}|AIza[A-Za-z0-9_\-]{12,}|xai-[A-Za-z0-9_\-]{8,}|ghp_[A-Za-z0-9]{12,}|github_pat_[A-Za-z0-9_]{12,}|Bearer\s+[A-Za-z0-9._\-]{8,})/gi;
-const URL_SECRET_QUERY_RE = /([?&](?:token|auth|signature|key|secret)=)[^&\s#"']+/gi;
-
-export function sanitizeSecretText(text) {
-  return String(text || '')
-    .replace(/https?:\/\/[^/\s:@]+:[^/\s@]+@/gi, 'https://***@')
-    .replace(URL_SECRET_QUERY_RE, '$1<REDACTED>')
-    .replace(SECRET_TOKEN_RE, '***REDACTED***');
 }
 
 function serializeJsonForEval(val) {
@@ -627,84 +619,18 @@ const INLINE_DIFF_REV_PARSE_TIMEOUT_MS = 3000;
 const INLINE_DIFF_GIT_DIFF_TIMEOUT_MS = 4500;
 const INLINE_DIFF_MAX_GIT_POINTER_BYTES = 4096;
 
-const INLINE_DIFF_SENSITIVE_BASENAMES = new Set([
-  'config.json',
-  'model-hub.config.json',
-  'secrets.json',
-  'credentials.json',
-  'auth.json',
-  'token.json',
-  'mcp_config.json',
-  'transcript.jsonl',
-  'transcript_full.jsonl',
-  'state.vscdb',
-  '.claude.json',
-  'keys.txt',
-  '.npmrc',
-  '.pypirc',
-  '.git-credentials',
-  '.netrc',
-  'kubeconfig',
-  'cookies',
-  'cookies-journal',
-  'login data',
-  'login data-journal',
-  'local state',
-  'web data',
-]);
-
-const INLINE_DIFF_SENSITIVE_EXTS = new Set([
-  '.env',
-  '.pem',
-  '.key',
-  '.p12',
-  '.pfx',
-  '.kdbx',
-  '.jks',
-  '.keystore',
-  '.ppk',
-  '.ovpn',
-  '.vscdb',
-  '.sqlite',
-  '.sqlite3',
-  '.db',
-]);
-
-const INLINE_DIFF_SENSITIVE_DIRS = new Set([
-  '.ssh',
-  '.aws',
-  '.gnupg',
-  '.kube',
-  '.gemini',
-  '.azure',
-  '.claude',
-  '.codex',
-]);
-
-const INLINE_DIFF_SENSITIVE_SSH_KEYS = new Set([
-  'id_rsa',
-  'id_ed25519',
-  'id_ecdsa',
-  'id_dsa',
-  'id_ed25519_sk',
-  'id_ecdsa_sk',
-]);
-
-const INLINE_DIFF_SENSITIVE_SYS_PREFIX_RE =
-  /^(?:\/(?:proc|sys|dev|etc)(?:\/|$)|(?:[a-z]:)?\/(?:windows|program files(?: \(x86\))?|programdata)(?:\/|$))/;
-
-const INLINE_DIFF_SENSITIVE_SUBPATH_RE =
-  /(?:^|\/)(?:\.config\/(?:gcloud|gh)|appdata\/roaming|appdata\/local\/google|library\/application support\/google|library\/keychains)(?:\/|$)/;
-
-const INLINE_DIFF_SENSITIVE_SYS_SUFFIXES = [
-  '/etc/shadow',
-  '/etc/gshadow',
-  '/etc/master.passwd',
-  '/etc/sudoers',
-  '/windows/system32/config/sam',
-  '/windows/system32/config/system',
-  '/windows/system32/config/security',
-];
+const SENSITIVE_PATH_RULES = JSON.parse(
+  fs.readFileSync(new URL('./sensitive-path-rules.json', import.meta.url), 'utf8')
+);
+const INLINE_DIFF_SENSITIVE_BASENAMES = new Set(SENSITIVE_PATH_RULES.basenames || []);
+const INLINE_DIFF_SENSITIVE_EXTS = new Set(SENSITIVE_PATH_RULES.extensions || []);
+const INLINE_DIFF_SENSITIVE_DIRS = new Set(SENSITIVE_PATH_RULES.directories || []);
+const INLINE_DIFF_SENSITIVE_SSH_KEYS = new Set(SENSITIVE_PATH_RULES.sshKeyNames || []);
+const INLINE_DIFF_SENSITIVE_SYS_PREFIX_RE = new RegExp(SENSITIVE_PATH_RULES.sysPrefixPattern);
+const INLINE_DIFF_SENSITIVE_SUBPATH_RE = new RegExp(SENSITIVE_PATH_RULES.subpathPattern);
+const INLINE_DIFF_SENSITIVE_SYS_SUFFIXES = Array.isArray(SENSITIVE_PATH_RULES.sysSuffixes)
+  ? SENSITIVE_PATH_RULES.sysSuffixes
+  : [];
 
 function clampPositiveInt(value, fallback, maxAllowed) {
   const n = Number(value);
@@ -738,7 +664,7 @@ function hasDotDotPathSegment(rawPath) {
   return parts.some((seg) => seg === '..');
 }
 
-function isSensitiveInlineDiffPath(filePath) {
+export function isSensitiveInlineDiffPath(filePath) {
   if (typeof filePath !== 'string' || !filePath) return true;
   let normalized = filePath.replace(/\\/g, '/');
   while (normalized.endsWith('/')) normalized = normalized.slice(0, -1);
@@ -1998,6 +1924,87 @@ function isAutomatedTestRuntime() {
   return Array.isArray(process.execArgv) && process.execArgv.some((a) => a === '--test' || a.startsWith('--test-'));
 }
 
+const WINDOWS_DAEMON_IMAGE_RE =
+  /^(?:node|nodejs|obsidian-prism(?:-watcher)?|watcher|agy-claude-style|antigravity|electron|agy)(?:\.exe)?$/i;
+
+/**
+ * 解析 Windows `tasklist /FO CSV /NH` 输出中的目标 PID 映像名。
+ */
+export function parseTasklistCsvImageName(csvOutput, expectedPid) {
+  const targetPid = Number(expectedPid);
+  if (!Number.isInteger(targetPid) || targetPid <= 0) return '';
+  const lines = String(csvOutput || '').split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || !line.startsWith('"')) continue;
+    const fields = [];
+    let cur = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i += 1) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQuotes && line[i + 1] === '"') {
+          cur += '"';
+          i += 1;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (ch === ',' && !inQuotes) {
+        fields.push(cur);
+        cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    fields.push(cur);
+    if (fields.length >= 2 && Number(fields[1].trim()) === targetPid) {
+      return String(fields[0] || '').trim();
+    }
+  }
+  return '';
+}
+
+/**
+ * 通过原生 `tasklist /FO CSV /NH` 查询指定 Windows PID 的进程映像名。
+ */
+export function queryWindowsProcessImageNameSync(pid, execFn = execFileSync) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return '';
+  try {
+    const out = execFn('tasklist', ['/FI', `PID eq ${n}`, '/FO', 'CSV', '/NH'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return parseTasklistCsvImageName(out, n);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 校验 .daemon.pid 锁文件中的 PID 与 ownerToken 是否有效且指向旧守护实例。
+ */
+export function verifyDaemonPidLockToken(pidFile, expectedPid, currentOwnerToken = '') {
+  const targetPid = Number(expectedPid);
+  if (!pidFile || !Number.isInteger(targetPid) || targetPid <= 0) return false;
+  try {
+    const st = fs.lstatSync(pidFile);
+    if (st.isSymbolicLink() || !st.isFile()) return false;
+    const raw = fs.readFileSync(pidFile, 'utf8').trim();
+    if (!raw || !raw.startsWith('{')) return false;
+    const parsed = JSON.parse(raw);
+    if (Number(parsed?.pid) !== targetPid) return false;
+    const token = typeof parsed?.token === 'string' ? parsed.token.trim() : '';
+    if (!token) return false;
+    if (currentOwnerToken && token === currentOwnerToken) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function queryProcessCommandLineSync(pid) {
   const n = Number(pid);
   if (!Number.isInteger(n) || n <= 0) return null;
@@ -2008,13 +2015,7 @@ function queryProcessCommandLineSync(pid) {
       return raw.toString('utf8').replace(/\0+/g, ' ').trim();
     }
     if (process.platform === 'win32') {
-      const psScript = `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${n}' -ErrorAction SilentlyContinue).CommandLine`;
-      const out = execFileSync(
-        'powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-Command', psScript],
-        { encoding: 'utf8', windowsHide: true, timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }
-      );
-      return String(out || '').trim();
+      return null;
     }
     const out = execFileSync('ps', ['-p', String(n), '-o', 'command='], {
       encoding: 'utf8',
@@ -2138,6 +2139,8 @@ export class PrismDaemon {
     this.periodicPickerCodeHash = '';
     this._periodicPickerHashSource = '';
     this.settingsExpr = '';
+    this.settingsCodeHash = '';
+    this._settingsHashSource = '';
     this.mascotExpr = '';
     this.mascotCodeHash = '';
     this._mascotHashSource = '';
@@ -2226,7 +2229,7 @@ export class PrismDaemon {
     this.updateService =
       _testUpdateService ||
       new UpdateService({
-        currentVersion: this.cdp?.PLUGIN_VERSION || '1.0.8-beta.2',
+        currentVersion: this.cdp?.PLUGIN_VERSION || '1.0.8-beta.3',
         channel: initialUpdateChannel,
       });
     if (_testUpdateService && typeof _testUpdateService.setChannel === 'function') {
@@ -3755,7 +3758,7 @@ export class PrismDaemon {
   }
 
   _buildCombinedUpdateStatus({ relState = null, gitState = null, action = 'update-status', channelOverride = null } = {}) {
-    const currentVersion = this.cdp?.PLUGIN_VERSION || this.updateService?.currentVersion || '1.0.8-beta.2';
+    const currentVersion = this.cdp?.PLUGIN_VERSION || this.updateService?.currentVersion || '1.0.8-beta.3';
     const rel = relState || this.updateService?.getStatus?.() || {};
     const autoUpdate = this._getAutoUpdateSetting();
     const explicitChannel = channelOverride === 'beta' || channelOverride === 'stable' ? channelOverride : null;
@@ -4040,7 +4043,7 @@ export class PrismDaemon {
         ...applyRes,
         action: 'apply-update',
         channel,
-        currentVersion: this.cdp?.PLUGIN_VERSION || this.updateService?.currentVersion || '1.0.8-beta.2',
+        currentVersion: this.cdp?.PLUGIN_VERSION || this.updateService?.currentVersion || '1.0.8-beta.3',
       };
     }
 
@@ -4299,6 +4302,8 @@ export class PrismDaemon {
     this._buildWallpaperExprForConfig(cfg, cacheOpts);
     this._buildPeriodicPickerExprForConfig(cfg, cacheOpts);
     this.settingsExpr = '';
+    this.settingsCodeHash = '';
+    this._settingsHashSource = '';
     this._buildMascotExprForConfig(cfg, cacheOpts);
     this._buildSuggesterExprForConfig(cfg, cacheOpts);
     this._buildHomeStudioExprForConfig(cfg, cacheOpts);
@@ -5324,6 +5329,28 @@ export class PrismDaemon {
   }
 
   // ── 第九通道：设置面板 + 全量 8 语言词典按需下发（仅当设置弹窗打开时触发） ──────────
+  _extractSettingsCodeHash(expr) {
+    const str = typeof expr === 'string' ? expr : '';
+    if (!str) return '';
+    const m = /const targetHash = "([^"]+)"/.exec(str);
+    if (m && m[1]) return m[1];
+    return crypto.createHash('sha256').update(str).digest('hex').slice(0, 16);
+  }
+
+  _getSettingsExprHash(expr = this.settingsExpr) {
+    const str = typeof expr === 'string' ? expr : '';
+    if (!str) return '';
+    if (str === this._settingsHashSource && this.settingsCodeHash) {
+      return this.settingsCodeHash;
+    }
+    const hash = this._extractSettingsCodeHash(str);
+    if (str === this.settingsExpr) {
+      this._settingsHashSource = str;
+      this.settingsCodeHash = hash;
+    }
+    return hash;
+  }
+
   _ensureSettingsExpr(cacheOpts = undefined) {
     if (this.settingsExpr) return this.settingsExpr;
     if (typeof this.cdp?.buildSettingsChannelExpression !== 'function') return '';
@@ -5335,6 +5362,8 @@ export class PrismDaemon {
       this._scheduleBundleCacheFlush();
     }
     this.settingsExpr = typeof expr === 'string' ? expr : '';
+    this._settingsHashSource = this.settingsExpr;
+    this.settingsCodeHash = this._extractSettingsCodeHash(this.settingsExpr);
     return this.settingsExpr;
   }
 
@@ -5879,7 +5908,7 @@ export class PrismDaemon {
   _getSidebarServerMeta() {
     return {
       binding: SIDEBAR_BINDING,
-      version: this.cdp?.PLUGIN_VERSION || '1.0.8-beta.2',
+      version: this.cdp?.PLUGIN_VERSION || '1.0.8-beta.3',
       schemaVersion: 2,
       serviceReady: !this._sidebarStopped && typeof this.sidebarService?.handleRpc === 'function' &&
         !this.sidebarService.getBootDiagnostic?.(),
@@ -9956,6 +9985,7 @@ export class PrismDaemon {
           sidebarMode,
           hasHostI18n: Boolean(window.__agPrismHostI18n),
           hostI18nMode: String(window.__agPrismHostI18n?.getStatus?.()?.mode || ''),
+          hostI18nCodeHash: String(window.__agPrismHostI18n?.__prismCodeHash || ''),
           hasMascot: Boolean(window.__agDualMascotRig || globalThis.__agDualMascotRig),
           mascotCodeHash: String((window.__agDualMascotRig || globalThis.__agDualMascotRig)?.__prismCodeHash || ''),
           hasHomeStudio: Boolean(window.__agPrismHomeStudioPanel || globalThis.__agPrismHomeStudioPanel || window.__agHomeStudioPanel || globalThis.__agHomeStudioPanel),
@@ -9965,6 +9995,13 @@ export class PrismDaemon {
               document.querySelector('.agy-home') &&
               !(window.__agPrismHomeStudioPanel || globalThis.__agPrismHomeStudioPanel || window.__agHomeStudioPanel || globalThis.__agHomeStudioPanel)
           ),
+          hasSettingsPanel: Boolean(
+            (window.__agPrismSettingsPanel || globalThis.__agPrismSettingsPanel) &&
+              window.__agCsLocales &&
+              window.__agCsLocales.__isFullLocales
+          ),
+          hasSettingsDialog: Boolean(document.querySelector('[role="dialog"]') || document.getElementById('ag-cs-settings-sec')),
+          settingsCodeHash: String((window.__agPrismSettingsPanel || globalThis.__agPrismSettingsPanel)?.__prismCodeHash || ''),
           needsSettingsChannel: Boolean(
             (document.querySelector('[role="dialog"]') || document.getElementById('ag-cs-settings-sec')) &&
               (!window.__agPrismSettingsPanel || !(window.__agCsLocales && window.__agCsLocales.__isFullLocales))
@@ -9974,6 +10011,7 @@ export class PrismDaemon {
           hasInlineDiff: Boolean(window.__agPrismInlineDiff && !window.__agPrismInlineDiff.getDebugState?.()?.destroyed),
           hasWallpaper: Boolean(window.__agPrismWallpaper && !window.__agPrismWallpaper.getDebugState?.()?.destroyed),
           hasWallpaperUi: Boolean(typeof window.__prismMountWallpaperUi === 'function'),
+          wallpaperCodeHash: String((window.__agPrismWallpaper || globalThis.__agPrismWallpaper)?.__prismCodeHash || ''),
           hasSuggester: Boolean(window.__agPrismSuggester && !window.__agPrismSuggester.getDebugState?.()?.destroyed),
           hasSuggesterUi: Boolean(typeof window.__prismMountSuggesterUi === 'function'),
           hasPeriodicPicker: Boolean(
@@ -10022,10 +10060,12 @@ export class PrismDaemon {
           : [];
       const needsIsoHostI18nSync =
         uncheckedIsoCtxs.length > 0 || (expectedHostI18nMode !== 'off' && Boolean(entry.isolatedHostI18nPaused));
+      const expectedHostI18nHash = hostI18nEnabled && this.hostI18nExpr ? (/const targetHash = "([^"]+)"/.exec(this.hostI18nExpr)?.[1] || '') : '';
+      const hostI18nHashMismatch = Boolean(expectedHostI18nHash && probe.hostI18nCodeHash && probe.hostI18nCodeHash !== expectedHostI18nHash);
       const needsHostI18nHeal =
         (hostI18nEnabled &&
           !hostI18nSkippedSameSig &&
-          (!probe.hasHostI18n || !entry.hostI18nScriptId || (probe.hostI18nMode && probe.hostI18nMode !== expectedHostI18nMode))) ||
+          (!probe.hasHostI18n || !entry.hostI18nScriptId || hostI18nHashMismatch || (probe.hostI18nMode && probe.hostI18nMode !== expectedHostI18nMode))) ||
         (expectedHostI18nMode === 'off' && uncheckedIsoCtxs.length > 0);
       const needsHostI18nCleanup =
         (!hostI18nEnabled && Boolean(probe.hasHostI18n || entry.hostI18nScriptId || entry.hostI18nMounted)) ||
@@ -10042,10 +10082,17 @@ export class PrismDaemon {
         (!probe.hasInlineDiff || !entry.inlineDiffScriptId || !entry.inlineDiffMounted);
       const needsInlineDiffCleanup =
         !inlineDiffAvailable && Boolean(probe.hasInlineDiff || entry.inlineDiffScriptId || entry.inlineDiffMounted);
+      if (wallpaperAvailable && !entry.wallpaperSkipped && !this.wallpaperExpr && typeof this.cdp.buildWallpaperExpression === 'function') {
+        this._buildWallpaperExprForConfig(cfg);
+      }
+      const expectedWallpaperHash = wallpaperAvailable && this.wallpaperExpr ? this._getWallpaperExprHash(this.wallpaperExpr) : '';
+      const wallpaperHashMismatch = Boolean(
+        expectedWallpaperHash && probe.wallpaperCodeHash && probe.wallpaperCodeHash !== expectedWallpaperHash
+      );
       const needsWallpaperHeal =
         wallpaperAvailable &&
         !entry.wallpaperSkipped &&
-        (!probe.hasWallpaper || !probe.hasWallpaperUi || !entry.wallpaperScriptId || !entry.wallpaperMounted);
+        (!probe.hasWallpaper || !probe.hasWallpaperUi || wallpaperHashMismatch || !entry.wallpaperScriptId || !entry.wallpaperMounted);
       const needsWallpaperCleanup =
         !wallpaperAvailable && Boolean(probe.hasWallpaper || probe.hasWallpaperUi || entry.wallpaperScriptId || entry.wallpaperMounted);
       const needsSuggesterHeal =
@@ -10097,6 +10144,12 @@ export class PrismDaemon {
       const homeStudioScriptStale = Boolean(!entry.homeStudioScriptId || (expectedHomeStudioSig && entry.lastHomeStudioScriptSig !== expectedHomeStudioSig));
       const needsHomeStudioHeal = hasHomeStudioOnDisk && (!probe.hasHomeStudio || homeStudioHashMismatch || homeStudioScriptStale);
       const needsHomeStudioCleanup = !homeStudioEnabled && Boolean(probe.hasHomeStudio || entry.homeStudioScriptId || entry.homeStudioMounted);
+      const shouldCheckSettingsHash = Boolean(probe.needsSettingsChannel || probe.hasSettingsPanel || probe.settingsCodeHash);
+      const expectedSettingsHash = shouldCheckSettingsHash ? this._getSettingsExprHash(this._ensureSettingsExpr()) : '';
+      const settingsHashMismatch = Boolean(
+        expectedSettingsHash && (probe.hasSettingsPanel || probe.settingsCodeHash) && probe.settingsCodeHash !== expectedSettingsHash
+      );
+      const needsSettingsHeal = Boolean(probe.needsSettingsChannel || settingsHashMismatch);
       let healed = false;
       if (
         (entry.sidebarHostVerified === false && probe.isHostDom) ||
@@ -10247,7 +10300,7 @@ export class PrismDaemon {
             isoHealRes = await this._syncIsolatedHostI18n(entry, true, { skipNoExt: true });
           }
           let evaluatedHostI18nHeal = false;
-          if (!probe.hasHostI18n || !entry.hostI18nScriptId || (probe.hostI18nMode && probe.hostI18nMode !== expectedHostI18nMode)) {
+          if (!probe.hasHostI18n || !entry.hostI18nScriptId || hostI18nHashMismatch || (probe.hostI18nMode && probe.hostI18nMode !== expectedHostI18nMode)) {
             if (!this.hostI18nExpr && typeof this.cdp.buildHostI18nExpression === 'function') {
               const chOpts = this._getChannelCacheOpts(true);
               this.hostI18nExpr = chOpts
@@ -10257,7 +10310,11 @@ export class PrismDaemon {
             }
             if (this.hostI18nExpr) {
               const hiSig = this._getHostI18nCfgSig(cfg);
-              if (!entry.hostI18nScriptId) {
+              if (!entry.hostI18nScriptId || hostI18nHashMismatch) {
+                if (entry.hostI18nScriptId) {
+                  await entry.session.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: entry.hostI18nScriptId }).catch(() => {});
+                  entry.hostI18nScriptId = null;
+                }
                 const hiAdd = await entry.session
                   .send('Page.addScriptToEvaluateOnNewDocument', { source: this.hostI18nExpr })
                   .catch(() => null);
@@ -10266,7 +10323,7 @@ export class PrismDaemon {
                   entry.lastHostI18nScriptSig = hiSig;
                 }
               }
-              if (!probe.hasHostI18n || (probe.hostI18nMode && probe.hostI18nMode !== expectedHostI18nMode)) {
+              if (!probe.hasHostI18n || hostI18nHashMismatch || (probe.hostI18nMode && probe.hostI18nMode !== expectedHostI18nMode)) {
                 const evalRes = await entry.session.evaluate(this.hostI18nExpr, false, 4500).catch(() => null);
                 if (evalRes?.skippedByLiveCfg) {
                   entry.hostI18nMounted = false;
@@ -10394,7 +10451,11 @@ export class PrismDaemon {
           }
           if (this.wallpaperExpr) {
             const wallpaperHash = this._getWallpaperExprHash(this.wallpaperExpr);
-            if (!entry.wallpaperScriptId) {
+            if (!entry.wallpaperScriptId || (wallpaperHash && entry.lastWallpaperScriptHash !== wallpaperHash)) {
+              if (entry.wallpaperScriptId) {
+                await entry.session.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: entry.wallpaperScriptId }).catch(() => {});
+                entry.wallpaperScriptId = null;
+              }
               const wallpaperAdd = await entry.session
                 .send('Page.addScriptToEvaluateOnNewDocument', { source: this.wallpaperExpr })
                 .catch(() => null);
@@ -10448,6 +10509,9 @@ export class PrismDaemon {
           entry.suggesterSkipped = false;
           entry.lastSuggesterHash = '';
           entry.lastSuggesterScriptHash = '';
+        }
+        if (needsSettingsHeal) {
+          await this._deliverSettingsChannelToEntry(entry);
         }
         this.log(`[↻] Hot-healed window to Obsidian Prism v${this.cdp.PLUGIN_VERSION}: ${this._redactSensitiveText(entry.title)}`);
       } else {
@@ -10511,7 +10575,7 @@ export class PrismDaemon {
             isoHealRes2 = await this._syncIsolatedHostI18n(entry, true, { skipNoExt: true });
           }
           let evaluatedHostI18nHeal2 = false;
-          if (hostI18nEnabled && !hostI18nSkippedSameSig && (!probe.hasHostI18n || !entry.hostI18nScriptId || (probe.hostI18nMode && probe.hostI18nMode !== expectedHostI18nMode))) {
+          if (hostI18nEnabled && !hostI18nSkippedSameSig && (!probe.hasHostI18n || !entry.hostI18nScriptId || hostI18nHashMismatch || (probe.hostI18nMode && probe.hostI18nMode !== expectedHostI18nMode))) {
             if (!this.hostI18nExpr && typeof this.cdp.buildHostI18nExpression === 'function') {
               const chOpts = this._getChannelCacheOpts(true);
               this.hostI18nExpr = chOpts
@@ -10521,7 +10585,11 @@ export class PrismDaemon {
             }
             if (this.hostI18nExpr) {
               const hiSig = this._getHostI18nCfgSig(cfg);
-              if (!entry.hostI18nScriptId) {
+              if (!entry.hostI18nScriptId || hostI18nHashMismatch) {
+                if (entry.hostI18nScriptId) {
+                  await entry.session.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: entry.hostI18nScriptId }).catch(() => {});
+                  entry.hostI18nScriptId = null;
+                }
                 const hiAdd = await entry.session
                   .send('Page.addScriptToEvaluateOnNewDocument', { source: this.hostI18nExpr })
                   .catch(() => null);
@@ -10530,7 +10598,7 @@ export class PrismDaemon {
                   entry.lastHostI18nScriptSig = hiSig;
                 }
               }
-              if (!probe.hasHostI18n || (probe.hostI18nMode && probe.hostI18nMode !== expectedHostI18nMode)) {
+              if (!probe.hasHostI18n || hostI18nHashMismatch || (probe.hostI18nMode && probe.hostI18nMode !== expectedHostI18nMode)) {
                 const evalRes = await entry.session.evaluate(this.hostI18nExpr, false, 4500).catch(() => null);
                 if (evalRes?.skippedByLiveCfg) {
                   entry.hostI18nMounted = false;
@@ -10589,10 +10657,6 @@ export class PrismDaemon {
             forceEval: Boolean(probe.needsHomeStudioChannel),
             runCleanup: needsHomeStudioCleanup,
           });
-        }
-        if (probe.needsSettingsChannel) {
-          healed = true;
-          await this._deliverSettingsChannelToEntry(entry);
         }
         if (needsThoughtHeal) {
           healed = true;
@@ -10672,7 +10736,11 @@ export class PrismDaemon {
           }
           if (this.wallpaperExpr) {
             const wallpaperHash = this._getWallpaperExprHash(this.wallpaperExpr);
-            if (!entry.wallpaperScriptId) {
+            if (!entry.wallpaperScriptId || (wallpaperHash && entry.lastWallpaperScriptHash !== wallpaperHash)) {
+              if (entry.wallpaperScriptId) {
+                await entry.session.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: entry.wallpaperScriptId }).catch(() => {});
+                entry.wallpaperScriptId = null;
+              }
               const wallpaperAdd = await entry.session
                 .send('Page.addScriptToEvaluateOnNewDocument', { source: this.wallpaperExpr })
                 .catch(() => null);
@@ -10681,7 +10749,7 @@ export class PrismDaemon {
                 entry.lastWallpaperScriptHash = wallpaperHash;
               }
             }
-            if (!probe.hasWallpaper || !probe.hasWallpaperUi || !entry.wallpaperMounted) {
+            if (!probe.hasWallpaper || !probe.hasWallpaperUi || wallpaperHashMismatch || !entry.wallpaperMounted) {
               const evalRes = await entry.session.evaluate(this.wallpaperExpr, false, 4500).catch(() => null);
               await this._recordWallpaperEvalOutcome(entry, evalRes, wallpaperHash);
             }
@@ -10733,6 +10801,10 @@ export class PrismDaemon {
           entry.suggesterSkipped = false;
           entry.lastSuggesterHash = '';
           entry.lastSuggesterScriptHash = '';
+        }
+        if (needsSettingsHeal) {
+          healed = true;
+          await this._deliverSettingsChannelToEntry(entry);
         }
         if (probe.needsDashboardSync) {
           healed = true;
@@ -11446,7 +11518,13 @@ export class PrismDaemon {
     }
   }
 
-  stopExistingDaemon({ verifyPid = null, inspectCommandLine = null, inspectProcess = null, killProcess = null } = {}) {
+  stopExistingDaemon({
+    verifyPid = null,
+    inspectCommandLine = null,
+    inspectProcess = null,
+    queryTasklist = null,
+    killProcess = null,
+  } = {}) {
     try {
       if (!this.pidFile) return false;
       let pidStat;
@@ -11487,7 +11565,7 @@ export class PrismDaemon {
           // 兼容单测显式覆写 this.cdp.isExpectedDaemonProcess 注入校验钩子
           safeToKill = Boolean(this.cdp.isExpectedDaemonProcess(prevPid, this.pidFile));
         } else {
-          // P2-5: 复用 cdp.js 单次进程探针，避免 Windows 启动抢锁连续拉起两次 powershell.exe
+          // P2-5: 复用 cdp.js 单次进程探针，避免 Windows 启动抢锁重复拉起外部进程探针
           const hasUnifiedProbe =
             typeof inspectProcess === 'function' || typeof this.cdp.inspectProcessSync === 'function';
           const procInfo =
@@ -11501,14 +11579,24 @@ export class PrismDaemon {
             : Boolean(this.cdp.isExpectedDaemonProcess(prevPid, this.pidFile));
           if (!cdpVerified) {
             safeToKill = false;
+          } else if (typeof inspectCommandLine === 'function') {
+            safeToKill = isObsidianPrismDaemonCommandLine(inspectCommandLine(prevPid));
+          } else if (hasUnifiedProbe && typeof procInfo?.commandLine === 'string' && procInfo.commandLine.trim()) {
+            // 存在命令行信息时执行命令行身份复核，防误杀无关 node 进程
+            safeToKill = isObsidianPrismDaemonCommandLine(procInfo.commandLine);
+          } else if (process.platform === 'win32') {
+            // Windows 无命令行探针时使用原生 tasklist /FO CSV /NH 映像名 + .daemon.pid 锁文件 token 双重校验
+            const imgName =
+              (procInfo && typeof procInfo.imageName === 'string' && procInfo.imageName.trim()) ||
+              (typeof queryTasklist === 'function'
+                ? queryTasklist(prevPid)
+                : queryWindowsProcessImageNameSync(prevPid));
+            safeToKill =
+              Boolean(imgName) &&
+              WINDOWS_DAEMON_IMAGE_RE.test(imgName.trim()) &&
+              verifyDaemonPidLockToken(this.pidFile, prevPid, this.ownerToken);
           } else {
-            // 标准 cdp.isExpectedDaemonProcess 对 node.exe 仅核对映像名，补充命令行身份复核防误杀无关 node 进程
-            const cmd =
-              typeof inspectCommandLine === 'function'
-                ? inspectCommandLine(prevPid)
-                : hasUnifiedProbe
-                ? procInfo?.commandLine || ''
-                : queryProcessCommandLineSync(prevPid);
+            const cmd = hasUnifiedProbe ? procInfo?.commandLine || '' : queryProcessCommandLineSync(prevPid);
             safeToKill = isObsidianPrismDaemonCommandLine(cmd);
           }
         }

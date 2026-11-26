@@ -1,4 +1,4 @@
-// Obsidian Prism — Omni Native Browser Router, Context Menu & Streaming Workbench Client (v1.0.8-beta.2)
+// Obsidian Prism — Omni Native Browser Router, Context Menu & Streaming Workbench Client (v1.0.8-beta.3)
 // Second-channel runtime (`window.__agPrismOmni`) + CommonJS factory for deterministic unit tests.
 // Engineering & security guarantees:
 // 1. ZERO custom side-dock DOM or rogue `wcvBrowser` calls: 100% native integration with Antigravity's
@@ -32,7 +32,7 @@
 })(typeof window !== 'undefined' ? window : globalThis, function () {
   'use strict';
 
-  const VERSION = '1.0.8-beta.2';
+  const VERSION = '1.0.8-beta.3';
   const STYLE_EL_ID = 'ag-prism-omni-css';
   const HL_URL_NAME = 'ag-omni-url';
   const HL_PATH_NAME = 'ag-omni-path';
@@ -2770,8 +2770,15 @@
         if (!sawExplicitScan && cur.getAttribute?.('role') === 'dialog') {
           return true;
         }
+        if (cur.hasAttribute?.('data-hover-card-popup') || cur.tagName === 'ASIDE') return true;
+        if (d === 0) {
+          const f = cur.firstElementChild;
+          if (f?.hasAttribute?.('data-hover-card-popup') || f?.firstElementChild?.hasAttribute?.('data-hover-card-popup')) return true;
+          if (cur.hasAttribute?.('data-base-ui-portal') && cur.querySelector?.('[data-hover-card-popup]')) return true;
+        }
         const tid = cur.getAttribute?.('data-testid');
-        if (tid === 'agent-input-box' || tid === 'conversation-row-sidebar') return true;
+        if (tid === 'agent-input-box' || tid === 'conversation-row-sidebar' || tid === 'conversation-list-sidebar' || tid === 'project-header') return true;
+        if (cur.parentElement?.getAttribute?.('data-testid') === 'sidebar-split' && cur === cur.parentElement.firstElementChild) return true;
         const cls = typeof cur.className === 'string' ? cur.className : '';
         if (
           cls &&

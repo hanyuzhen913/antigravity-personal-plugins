@@ -43,9 +43,9 @@
     onPointerActivity, onComposerRimUpdate,
   }) {
     const lastPointerPos = { x: -9999, y: -9999 };
-    let prismRaf = 0, idleT = 0, lastPrismDrawAt = 0, prismBoxCacheDirty = true, prismBoxCacheAt = 0, lastPrismRectReadAt = 0;
-    let cachedPrismBoxes = [], cachedOrchEntry = null, prismBoxRo = null, stepPlanIo = null, compRimSig = '0';
-    const observedPrismSet = new Set(), trackedRimCanvases = new Set(), spObs = new Set(), spVis = new Map(), spOn = new Set();
+    let prismRaf = 0, idleT = 0, lastPrismDrawAt = 0, pDirty = true, prismBoxCacheAt = 0, lastPrismRectReadAt = 0;
+    let pBoxes = [], orchE = null, prismBoxRo = null, stepPlanIo = null, compRimSig = '0';
+    const obsSet = new Set(), trkCvs = new Set(), spObs = new Set(), spVis = new Map(), spOn = new Set();
 
     const getDoc = () => (typeof document !== 'undefined' ? document : null);
     const getHtml = () => getDoc()?.documentElement || null;
@@ -53,7 +53,7 @@
 
     const emitComposerRim = (v) => {
       if (!isFn(onComposerRimUpdate)) return;
-      const on = Boolean(v && v.strength > 0.015);
+      const on = !!(v && v.strength > 0.015);
       const sig = on ? `1|${Math.round(v.localX / 6)}|${Math.round(v.strength * 12)}|${v.toneKey}|${v.dark ? 1 : 0}` : '0';
       if (sig === compRimSig) return;
       compRimSig = sig;
@@ -75,8 +75,10 @@
       return m === 'off' || m === 'subtle';
     };
 
-    const isH = () => Boolean(getDoc()?.hidden);
+    const isH = () => !!(getDoc()?.hidden);
     const isWB = () => isH() || ga(getHtml(), 'data-ag-cs-win-blur') === '1';
+    const isRimOn = () => !isRimMotionDisabled() && readAmbientScale() > 0.001;
+    const hasLitRim = () => pBoxes.some((e) => !e.wasCleared) || !!(orchE && !orchE.wasCleared);
     const isDragSuspended = () => { const h = getHtml(); return ga(h, 'data-ag-cs-resizing') === '1' || ga(h, 'data-ag-cs-mascot-drag') === '1'; };
     const clrIdle = () => { if (idleT) { isFn(G.clearTimeout) && clearTimeout(idleT); idleT = 0; } };
     const zCv = (c) => { if (c && (c.width || c.height)) c.width = c.height = 0; };
@@ -85,18 +87,18 @@
     const shrinkRims = (all) => {
       clrIdle();
       if (!all && isDestroyed()) return;
-      for (const e of cachedPrismBoxes) zEnt(e, all);
-      zEnt(cachedOrchEntry, all);
+      for (const e of pBoxes) zEnt(e, all);
+      zEnt(orchE, all);
       if (all) {
         emitComposerRim(null);
-        for (const c of trackedRimCanvases) zCv(c);
+        for (const c of trkCvs) zCv(c);
         getDoc()?.querySelectorAll?.(CV_S)?.forEach?.(zCv);
       }
     };
     const armIdle = () => {
       if (isDestroyed() || typeof setTimeout !== 'function') return;
       const ok = (e) => e?.wasCleared && e.cv && (e.cv.width > 0 || e.cv.height > 0);
-      if (!ok(cachedOrchEntry) && !cachedPrismBoxes.some(ok)) return clrIdle();
+      if (!ok(orchE) && !pBoxes.some(ok)) return clrIdle();
       if (!idleT) idleT = setTimeout(() => shrinkRims(0), 1800);
     };
 
@@ -110,8 +112,8 @@
     };
 
     const clearAllRimCanvases = (immediateShrink = false) => {
-      cachedPrismBoxes.forEach(clearRimEntry);
-      clearRimEntry(cachedOrchEntry);
+      pBoxes.forEach(clearRimEntry);
+      clearRimEntry(orchE);
       emitComposerRim(null);
       getDoc()?.querySelectorAll?.(CV_S)?.forEach?.((cv) => {
         try { const ctx = cv.getContext?.('2d'); if (ctx && cv.width > 0 && cv.height > 0) ctx.clearRect(0, 0, cv.width, cv.height); } catch {}
@@ -122,7 +124,7 @@
 
     const removeSingleRimCanvas = (cv) => {
       if (!cv) return;
-      trackedRimCanvases.delete(cv);
+      trkCvs.delete(cv);
       const host = cv.parentElement;
       try { const ctx = cv.getContext?.('2d'); if (ctx && cv.width > 0 && cv.height > 0) ctx.clearRect(0, 0, cv.width, cv.height); } catch {}
       zCv(cv);
@@ -132,25 +134,25 @@
 
     const pruneDetachedBoxes = (activeTrack) => {
       const keepBox = (b) => !dis(b) && ga(b, PB) === '1';
-      if (cachedPrismBoxes.length) {
+      if (pBoxes.length) {
         let kept = null;
-        for (let i = 0; i < cachedPrismBoxes.length; i++) {
-          const e = cachedPrismBoxes[i];
+        for (let i = 0; i < pBoxes.length; i++) {
+          const e = pBoxes[i];
           if (e && keepBox(e.box)) { if (kept) kept.push(e); }
           else {
-            if (!kept) kept = cachedPrismBoxes.slice(0, i);
+            if (!kept) kept = pBoxes.slice(0, i);
             if (e?.cv) removeSingleRimCanvas(e.cv);
-            if (e?.box) unobs(prismBoxRo, observedPrismSet, e.box);
+            if (e?.box) unobs(prismBoxRo, obsSet, e.box);
           }
         }
-        if (kept) cachedPrismBoxes = kept;
+        if (kept) pBoxes = kept;
       }
-      if (cachedOrchEntry && (dis(cachedOrchEntry.box) || (activeTrack && cachedOrchEntry.box !== activeTrack))) {
-        if (cachedOrchEntry.cv) removeSingleRimCanvas(cachedOrchEntry.cv);
-        if (cachedOrchEntry.box) unobs(prismBoxRo, observedPrismSet, cachedOrchEntry.box);
-        cachedOrchEntry = null;
+      if (orchE && (dis(orchE.box) || (activeTrack && orchE.box !== activeTrack))) {
+        if (orchE.cv) removeSingleRimCanvas(orchE.cv);
+        if (orchE.box) unobs(prismBoxRo, obsSet, orchE.box);
+        orchE = null;
       }
-      for (const box of Array.from(observedPrismSet)) if (dis(box) || (ga(box, PB) !== '1' && box !== activeTrack)) unobs(prismBoxRo, observedPrismSet, box);
+      for (const box of Array.from(obsSet)) if (dis(box) || (ga(box, PB) !== '1' && box !== activeTrack)) unobs(prismBoxRo, obsSet, box);
     };
 
     const pruneOrphanRimCanvases = (fullScan = true) => {
@@ -160,11 +162,11 @@
       if (!d || !isFn(d.querySelectorAll)) return;
       const keepHost = (h) => !dis(h) && (ga(h, PB) === '1' || (activeTrack && h === activeTrack));
       if (!fullScan) {
-        for (const cv of Array.from(trackedRimCanvases)) if (dis(cv) || !keepHost(cv.parentElement)) removeSingleRimCanvas(cv);
+        for (const cv of Array.from(trkCvs)) if (dis(cv) || !keepHost(cv.parentElement)) removeSingleRimCanvas(cv);
         return;
       }
-      for (const cv of Array.from(trackedRimCanvases)) if (dis(cv)) trackedRimCanvases.delete(cv);
-      d.querySelectorAll(CV_S).forEach((cv) => { if (!keepHost(cv.parentElement)) removeSingleRimCanvas(cv); else trackedRimCanvases.add(cv); });
+      for (const cv of Array.from(trkCvs)) if (dis(cv)) trkCvs.delete(cv);
+      d.querySelectorAll(CV_S).forEach((cv) => { if (!keepHost(cv.parentElement)) removeSingleRimCanvas(cv); else trkCvs.add(cv); });
       d.querySelectorAll(`[${CV_A}]`).forEach((h) => { if (!keepHost(h) || !h.querySelector?.(CV_S)) ra(h, CV_A); });
     };
 
@@ -181,7 +183,7 @@
         if (cv.style?.setProperty) for (const k of ['margin', 'padding', 'border']) cv.style.setProperty(k, '0', 'important');
         hostEl.appendChild(cv);
       }
-      trackedRimCanvases.add(cv);
+      trkCvs.add(cv);
       const ctx = isFn(cv.getContext) ? cv.getContext('2d') : null;
       if (!ctx || !isFn(ctx.createRadialGradient)) { cv.remove(); return null; }
       setAttrIfChanged(hostEl, CV_A, '1');
@@ -232,7 +234,7 @@
       if (isDragSuspended()) return true;
       if (!entry || !entry.ctx || !entry.cv || !entry.rect) return false;
       if (!active || ambientScale <= 0.001) { clearRimEntry(entry); return true; }
-      const isMirror = Boolean(entry.mirrorMode), isReflB = !isMirror && Boolean(entry.reflectBottomMode);
+      const isMirror = !!entry.mirrorMode, isReflB = !isMirror && !!entry.reflectBottomMode;
       const dpr = Math.min((typeof window !== 'undefined' && window.devicePixelRatio) || G.devicePixelRatio || 1, 1.5);
       const w = Math.max(4, Math.round((entry.rect.width + (entry.insetPad || 0)) * dpr));
       const h = Math.max(4, Math.round((entry.rect.height + (entry.insetPad || 0)) * dpr));
@@ -320,9 +322,9 @@
     const ensurePrismBoxRo = () => {
       if (prismBoxRo || typeof ResizeObserver !== 'function') return prismBoxRo;
       prismBoxRo = new ResizeObserver(() => {
-        prismBoxCacheDirty = true;
-        if (!isDestroyed() && !isWB() && !isDragSuspended() && !isRimMotionDisabled() && readAmbientScale() > 0.001 && lastPointerPos.x >= -1000 && !prismRaf && isFn(G.requestAnimationFrame)) {
-          if (cachedPrismBoxes.some((e) => !e.wasCleared) || Boolean(cachedOrchEntry && !cachedOrchEntry.wasCleared)) { lastPrismDrawAt = 0; schedRaf(); }
+        pDirty = true;
+        if (!isDestroyed() && !isWB() && !isDragSuspended() && isRimOn() && lastPointerPos.x >= -1000 && !prismRaf && isFn(G.requestAnimationFrame)) {
+          if (hasLitRim()) { lastPrismDrawAt = 0; schedRaf(); }
         }
       });
       return prismBoxRo;
@@ -347,14 +349,14 @@
             const on = en.isIntersecting && (!br || (br.width >= 4 && br.height >= 4)) ? 1 : 0;
             if (spVis.get(t) !== on) { spVis.set(t, on); ch = 1; }
           }
-          if (ch) { prismBoxCacheDirty = true; syncSp(0); }
+          if (ch) { pDirty = true; syncSp(0); }
         });
       } catch { stepPlanIo = null; }
       return stepPlanIo;
     };
     const scanSp = (rd) => {
       const ps = Array.from(getDoc()?.querySelectorAll?.('[data-testid="step-plan"]') || []), des = new Set(), rcs = new Map();
-      if (!isRimMotionDisabled() && readAmbientScale() > 0.001 && !isWB()) {
+      if (isRimOn() && !isWB()) {
         for (let i = ps.length - 1; i >= 0 && des.size < 2; i--) {
           const e = ps[i];
           if (!spOk(e) || (spVis.has(e) && !spVis.get(e))) continue;
@@ -392,7 +394,7 @@
 
     const refreshPrismBoxRectCache = (now, allowReadRect) => {
       const sp = scanSp(allowReadRect), ro = ensurePrismBoxRo(), prevMap = new Map(), nextObserved = new Set(), next = [], bSet = new Set(), boxList = [];
-      for (const e of cachedPrismBoxes) prevMap.set(e.box, e);
+      for (const e of pBoxes) prevMap.set(e.box, e);
       for (const b of document.querySelectorAll(`[${PB}="1"]`) || []) if ((!spOn.has(b) || sp.des.has(b)) && !bSet.has(b)) { bSet.add(b); boxList.push(b); }
       for (const s of sp.des) if (!bSet.has(s)) { bSet.add(s); boxList.push(s); }
       const trackEl = getActiveCrystalTrack ? getActiveCrystalTrack() : null;
@@ -404,8 +406,8 @@
       const orchRect = trackEl && allowReadRect && trackEl.getBoundingClientRect ? trackEl.getBoundingClientRect() : null;
       const mkEntry = (box, rect, prev, insetPad, borderRadius, mirrorMode = false, reflectBottomMode = false) => {
         nextObserved.add(box);
-        if (ro && !observedPrismSet.has(box)) { try { ro.observe(box); observedPrismSet.add(box); } catch {} }
-        const reusePrev = Boolean(prev?.cv?.isConnected), rim = reusePrev ? prev : ensurePrismRimCanvas(box);
+        if (ro && !obsSet.has(box)) { try { ro.observe(box); obsSet.add(box); } catch {} }
+        const reusePrev = !!(prev?.cv?.isConnected), rim = reusePrev ? prev : ensurePrismRimCanvas(box);
         return {
           box, rect, cv: rim ? rim.cv : null, ctx: rim ? rim.ctx : null, insetPad, mirrorMode, reflectBottomMode, borderRadius,
           wasCleared: prev ? prev.wasCleared : false, _s: prev?._s || '', _x: prev?._x ?? -9999, _y: prev?._y ?? -9999,
@@ -415,17 +417,17 @@
       runGuardedMut(() => {
         if (sp.ps.length || spOn.size || spObs.size) applySp(sp.ps, sp.des);
         for (const { box, prev, borderRadius, rect } of preMeasured) {
-          const isHp = Boolean(box.classList?.contains?.('ag-cs-home-panel'));
+          const isHp = !!(box.classList?.contains?.('ag-cs-home-panel'));
           if (isHp && ga(box, PM) !== '1') setAttrIfChanged(box, PM, '1');
           const mirrorMode = ga(box, PM) === '1' || isHp, reflectBottomMode = !mirrorMode && ga(box, 'data-ag-cs-prism-reflect') === 'bottom';
           const pad = mirrorMode || isHp || ga(box, 'data-testid') === 'step-plan' ? 0 : 2;
           next.push(mkEntry(box, rect, prev, pad, borderRadius, mirrorMode, reflectBottomMode));
         }
-        if (trackEl) nextOrch = mkEntry(trackEl, orchRect, cachedOrchEntry?.box === trackEl ? cachedOrchEntry : null, 0, 999, false, false);
-        if (ro) for (const oldEl of Array.from(observedPrismSet)) if (!nextObserved.has(oldEl)) unobs(ro, observedPrismSet, oldEl);
+        if (trackEl) nextOrch = mkEntry(trackEl, orchRect, orchE?.box === trackEl ? orchE : null, 0, 999, false, false);
+        if (ro) for (const oldEl of Array.from(obsSet)) if (!nextObserved.has(oldEl)) unobs(ro, obsSet, oldEl);
         pruneOrphanRimCanvases();
       });
-      cachedPrismBoxes = next; cachedOrchEntry = nextOrch; prismBoxCacheDirty = false; prismBoxCacheAt = now;
+      pBoxes = next; orchE = nextOrch; pDirty = false; prismBoxCacheAt = now;
     };
 
     const flushPrismPointer = (rafNow) => {
@@ -433,7 +435,7 @@
       if (isDestroyed()) return;
       if (isH()) return shrinkRims(1);
       if (isWB()) return;
-      if (isDragSuspended()) { prismBoxCacheDirty = true; return; }
+      if (isDragSuspended()) { pDirty = true; return; }
       const ambientScale = readAmbientScale();
       if (isRimMotionDisabled() || ambientScale <= 0.001) {
         runGuardedMut(() => { pruneOrphanRimCanvases(); clearAllRimCanvases(true); });
@@ -446,16 +448,16 @@
       const { x, y } = lastPointerPos, allowReadRect = x >= -1000;
       const activeTrack = getActiveCrystalTrack ? getActiveCrystalTrack() : null;
       if (
-        prismBoxCacheDirty || !cachedPrismBoxes.length || (!prismBoxRo && now - prismBoxCacheAt > 2500) || now - prismBoxCacheAt > 8000 ||
-        activeTrack !== (cachedOrchEntry ? cachedOrchEntry.box : null) ||
-        cachedPrismBoxes.some((e) => dis(e.box) || (e.cv && e.cv.isConnected === false) || e.borderRadius < 0 || (allowReadRect && !e.rect))
+        pDirty || !pBoxes.length || (!prismBoxRo && now - prismBoxCacheAt > 2500) || now - prismBoxCacheAt > 8000 ||
+        activeTrack !== (orchE ? orchE.box : null) ||
+        pBoxes.some((e) => dis(e.box) || (e.cv && e.cv.isConnected === false) || e.borderRadius < 0 || (allowReadRect && !e.rect))
       ) {
         refreshPrismBoxRectCache(now, allowReadRect);
         lastPrismRectReadAt = now;
       } else if (allowReadRect && now - lastPrismRectReadAt >= (prismBoxRo ? 1500 : 250)) {
         lastPrismRectReadAt = now;
-        for (const e of cachedPrismBoxes) if (e.box?.getBoundingClientRect) e.rect = e.box.getBoundingClientRect();
-        if (cachedOrchEntry?.box?.getBoundingClientRect) cachedOrchEntry.rect = cachedOrchEntry.box.getBoundingClientRect();
+        for (const e of pBoxes) if (e.box?.getBoundingClientRect) e.rect = e.box.getBoundingClientRect();
+        if (orchE?.box?.getBoundingClientRect) orchE.rect = orchE.box.getBoundingClientRect();
       }
       const dark = isDarkTheme(), toneKey = resolveRimToneKey(dark);
       let compRim = null;
@@ -478,8 +480,8 @@
         if (entry.pyStr !== ny) { entry.pyStr = ny; entry.box.style.setProperty(vy, ny); }
       };
       runGuardedMut(() => {
-        for (const e of cachedPrismBoxes) drawEntry(e, 280, 240, '--ag-px', '--ag-py', 0);
-        if (cachedOrchEntry) { drawEntry(cachedOrchEntry, 120, 96, '--orch-px', '--orch-py', 10); setCrystalPointerClient?.(x, y); }
+        for (const e of pBoxes) drawEntry(e, 280, 240, '--ag-px', '--ag-py', 0);
+        if (orchE) { drawEntry(orchE, 120, 96, '--orch-px', '--orch-py', 10); setCrystalPointerClient?.(x, y); }
       });
       emitComposerRim(compRim);
       armIdle();
@@ -488,15 +490,23 @@
     const schedRaf = () => { if (!prismRaf && typeof requestAnimationFrame === 'function') prismRaf = requestAnimationFrame(flushPrismPointer); };
     const cancelPendingRaf = () => { if (prismRaf) { typeof cancelAnimationFrame === 'function' && cancelAnimationFrame(prismRaf); prismRaf = 0; } };
 
+    const SB_SEL = 'aside,[data-testid="sidebar-split"]>div:first-child,[data-testid="conversation-row-sidebar"],[data-testid="project-header"],[data-hover-card-popup]';
+    const inSb = (t) => { try { return !!t?.closest?.(SB_SEL); } catch { return false; } };
+
     const onPointerMove = (ev) => {
       if (isDestroyed() || isWB()) return;
       const x = Number(ev.clientX), y = Number(ev.clientY);
       lastPointerPos.x = x; lastPointerPos.y = y;
-      if (isDragSuspended()) { prismBoxCacheDirty = true; return; }
-      const now = performance.now();
-      if (!isRimMotionDisabled() && readAmbientScale() > 0.001 && !prismRaf && typeof requestAnimationFrame === 'function') {
+      if (isDragSuspended()) { pDirty = true; return; }
+      const now = performance.now(), rimOn = isRimOn();
+      if (inSb(ev?.target)) {
+        if (rimOn && hasLitRim()) { lastPointerPos.x = lastPointerPos.y = -9999; schedRaf(); }
+        onPointerActivity?.(now);
+        return;
+      }
+      if (rimOn && !prismRaf) {
         const far = (e, d) => { const r = e.rect; return e.wasCleared && r && (r.width < 4 || r.height < 4 || x < r.left - d || x > r.right + d || y < r.top - d || y > r.bottom + d); };
-        const farIdle = !prismBoxCacheDirty && cachedPrismBoxes.length > 0 && now - prismBoxCacheAt <= 6000 && now - lastPrismRectReadAt < 1500 && cachedPrismBoxes.every((e) => far(e, 360)) && (!cachedOrchEntry || far(cachedOrchEntry, 200));
+        const farIdle = !pDirty && pBoxes.length > 0 && now - prismBoxCacheAt <= 6000 && now - lastPrismRectReadAt < 1500 && pBoxes.every((e) => far(e, 360)) && (!orchE || far(orchE, 200));
         if (!farIdle) schedRaf();
       }
       onPointerActivity?.(now);
@@ -506,7 +516,7 @@
     const onVis = () => {
       if (isDestroyed()) return;
       if (isH()) { cancelPendingRaf(); shrinkRims(1); }
-      else if (!isWB() && !isRimMotionDisabled() && readAmbientScale() > 0.001 && lastPointerPos.x >= -1000) { lastPrismDrawAt = 0; schedRaf(); }
+      else if (!isWB() && isRimOn() && lastPointerPos.x >= -1000) { lastPrismDrawAt = 0; schedRaf(); }
     };
     const onWinBlur = () => { if (!isDestroyed()) { cancelPendingRaf(); clearAllRimCanvases(); } };
     const bindEv = (m) => {
@@ -518,31 +528,31 @@
     bindEv('addEventListener');
 
     const invalidateMetrics = () => {
-      prismBoxCacheDirty = true;
-      for (const e of cachedPrismBoxes) e.borderRadius = -1;
+      pDirty = true;
+      for (const e of pBoxes) e.borderRadius = -1;
       if (isDestroyed()) return;
       runGuardedMut(() => {
         pruneOrphanRimCanvases();
         if (isH()) { cancelPendingRaf(); shrinkRims(1); }
-        else if (isRimMotionDisabled() || readAmbientScale() <= 0.001) { cancelPendingRaf(); clearAllRimCanvases(true); }
+        else if (!isRimOn()) { cancelPendingRaf(); clearAllRimCanvases(true); }
         else if (!isWB() && !isDragSuspended() && lastPointerPos.x >= -1000) { lastPrismDrawAt = 0; schedRaf(); }
       });
     };
 
     const markDirty = () => {
-      prismBoxCacheDirty = true;
+      pDirty = true;
       if (isDestroyed()) return;
       syncSp(0);
       runGuardedMut(() => {
         pruneOrphanRimCanvases(false);
-        if (isRimMotionDisabled() || readAmbientScale() <= 0.001) { cancelPendingRaf(); clearAllRimCanvases(true); }
+        if (!isRimOn()) { cancelPendingRaf(); clearAllRimCanvases(true); }
       });
     };
 
     const teardown = () => {
-      cancelPendingRaf(); emitComposerRim(null); bindEv('removeEventListener'); shrinkRims(1); trackedRimCanvases.clear();
+      cancelPendingRaf(); emitComposerRim(null); bindEv('removeEventListener'); shrinkRims(1); trkCvs.clear();
       if (prismBoxRo) { try { prismBoxRo.disconnect(); } catch {} prismBoxRo = null; }
-      observedPrismSet.clear();
+      obsSet.clear();
       if (stepPlanIo) { try { stepPlanIo.disconnect(); } catch {} stepPlanIo = null; }
       spObs.clear(); spVis.clear();
       for (const s of spOn) { try { ra(s, PB); ra(s, PM); } catch {} }
@@ -553,7 +563,7 @@
         d.querySelectorAll?.(CV_S)?.forEach?.((n) => n.remove?.());
         d.querySelectorAll?.(`[${CV_A}]`)?.forEach?.((e) => ra(e, CV_A));
       }
-      cachedPrismBoxes = []; cachedOrchEntry = null;
+      pBoxes = []; orchE = null;
     };
 
     return {

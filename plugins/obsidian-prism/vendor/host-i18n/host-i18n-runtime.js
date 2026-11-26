@@ -77,6 +77,8 @@
     'model-selector-list': 1,
     'model-selector-orchestrator': 1,
     'orchestrator-effort-bar': 1,
+    'orchestrator-picker-row': 1,
+    'orchestrator-picker-effort': 1,
   };
 
   var PRISM_OWNED_IDS = {
@@ -275,7 +277,13 @@
     if (!el || el.nodeType !== 1) return false;
     var tid = preTid !== undefined ? preTid : getAttr(el, 'data-testid');
     if (tid && hasOwn.call(MODEL_SELECTOR_TESTIDS, tid)) return true;
-    if (hasAttr(el, 'data-effort') || hasAttr(el, 'data-ag-cs-model-submenu')) return true;
+    if (
+      hasAttr(el, 'data-effort') ||
+      hasAttr(el, 'data-ag-cs-model-submenu') ||
+      hasAttr(el, 'data-ag-cs-orch-l2') ||
+      hasAttr(el, 'data-ag-cs-orch-l3') ||
+      hasAttr(el, 'data-ces-orch-row')
+    ) return true;
     return false;
   }
 
@@ -2035,6 +2043,8 @@
     var pendingNodeSet = new Set();
     var rafId = null;
     var hoverScanTimer = null;
+    var hoverCardTimer = null;
+    var pendingHoverCardNode = null;
     var focusWakeTimer = null;
     var layer2bTimers = [];
     var domReadyHandler = null;
@@ -2373,6 +2383,13 @@
         } catch (e) {}
         hoverScanTimer = null;
       }
+      if (hoverCardTimer !== null) {
+        try {
+          clearTimeoutFn(hoverCardTimer);
+        } catch (e) {}
+        hoverCardTimer = null;
+      }
+      pendingHoverCardNode = null;
       if (focusWakeTimer !== null) {
         try {
           clearTimeoutFn(focusWakeTimer);
@@ -3433,6 +3450,7 @@
         if (!el || el.nodeType !== 1 || el.isConnected === false) return;
         if (candidateSet.has(el) || exemptElements.has(el)) return;
         if (isDialogOrPortalWrappingDialog(el) || isDirectIgnoredSelf(el)) return;
+        if (hasAttr(el, 'data-hover-card-popup') || (typeof el.querySelector === 'function' && (hasAttr(el, 'data-base-ui-portal') || hasAttr(el, 'data-floating-ui-portal')) && el.querySelector('[data-hover-card-popup]'))) return;
         candidateSet.add(el);
         candidates.push(el);
       }
@@ -3521,6 +3539,11 @@
         clearTimeoutFn(hoverScanTimer);
         hoverScanTimer = null;
       }
+      if (hoverCardTimer !== null) {
+        clearTimeoutFn(hoverCardTimer);
+        hoverCardTimer = null;
+      }
+      pendingHoverCardNode = null;
       if (focusWakeTimer !== null) {
         clearTimeoutFn(focusWakeTimer);
         focusWakeTimer = null;
@@ -3585,6 +3608,32 @@
         (win && win.MutationObserver) ||
         (typeof MutationObserver !== 'undefined' ? MutationObserver : null);
 
+      var isFocusGuard = function (n) {
+        return Boolean(n && n.nodeType === 1 && (hasAttr(n, 'data-floating-ui-focus-guard') || hasAttr(n, 'data-base-ui-focus-guard')));
+      };
+      var isHoverCardPortalOrSelf = function (n) {
+        if (!n || n.nodeType !== 1 || n === doc.body || n === doc.documentElement) return false;
+        if (hasAttr(n, 'data-hover-card-popup')) return true;
+        if (typeof n.closest === 'function' && n.closest('[data-hover-card-popup]')) return true;
+        if ((hasAttr(n, 'data-base-ui-portal') || hasAttr(n, 'data-floating-ui-portal') || getAttr(n, 'role') === 'presentation') && typeof n.querySelector === 'function' && n.querySelector('[data-hover-card-popup]')) return true;
+        for (var c = n.firstElementChild, k = 0; c && k < 4; c = c.nextElementSibling, k++) {
+          if (hasAttr(c, 'data-hover-card-popup') || hasAttr(c.firstElementChild, 'data-hover-card-popup') || hasAttr(c.lastElementChild, 'data-hover-card-popup')) return true;
+        }
+        return false;
+      };
+      var scheduleHoverCardNode = function (n) {
+        pendingHoverCardNode = n;
+        if (hoverCardTimer !== null) clearTimeoutFn(hoverCardTimer);
+        hoverCardTimer = setTimeoutFn(function () {
+          hoverCardTimer = null;
+          var hc = pendingHoverCardNode;
+          pendingHoverCardNode = null;
+          if (!state.active || state.destroyed || isPaused() || !hc || hc.isConnected === false) return;
+          enqueueNode(hc);
+          scheduleFlush();
+        }, 120);
+      };
+
       if (MutationObserverClass) {
         observer = new MutationObserverClass(function (mutations) {
           if (!state.active || state.destroyed) return;
@@ -3613,6 +3662,11 @@
               var added = mutation.addedNodes;
               if (targetEl && targetEl.nodeType === 1) {
                 if (targetEl.isConnected === false || exemptElements.has(targetEl)) continue;
+                var targetIsHoverCard = isHoverCardPortalOrSelf(targetEl);
+                if (targetIsHoverCard) {
+                  if (!pausedNow && added && added.length > 0) scheduleHoverCardNode(targetEl);
+                  continue;
+                }
                 var targetBound = getCachedBoundary(targetEl);
                 if (targetBound.blocked && !targetBound.canDescendConv) {
                   continue;
@@ -3628,7 +3682,11 @@
                   if (addedNode.nodeType === 3) {
                     if (targetBound.blocked || exemptNodes.has(addedNode)) continue;
                   } else if (addedNode.nodeType === 1) {
-                    if (exemptElements.has(addedNode) || isDirectIgnoredSelf(addedNode)) continue;
+                    if (exemptElements.has(addedNode) || isDirectIgnoredSelf(addedNode) || isFocusGuard(addedNode)) continue;
+                    if (isHoverCardPortalOrSelf(addedNode)) {
+                      if (!pausedNow) scheduleHoverCardNode(addedNode);
+                      continue;
+                    }
                     if (
                       targetBound.canDescendConv &&
                       !isInteractiveChatChromeSelf(addedNode, true) &&
@@ -3655,6 +3713,10 @@
               if (target.isConnected === false || exemptNodes.has(target)) continue;
               var parent = target.parentElement || target.parentNode;
               if (!parent || parent.nodeType !== 1 || parent.isConnected === false || exemptElements.has(parent)) {
+                continue;
+              }
+              if (isHoverCardPortalOrSelf(parent)) {
+                if (!pausedNow) scheduleHoverCardNode(parent);
                 continue;
               }
               var snap = textSnapshots.get(target);
@@ -3772,7 +3834,10 @@
         if (isContextMenu) {
           pendingFullFloatScan = true;
         } else if (e && e.type === 'pointerenter') {
+          var tg = String(target.tagName || '').toUpperCase();
+          if (tg === 'PATH' || tg === 'CIRCLE' || tg === 'RECT' || tg === 'LINE' || tg === 'POLYLINE' || tg === 'POLYGON' || tg === 'ELLIPSE' || tg === 'G' || tg === 'DEFS' || tg === 'USE' || tg === 'STOP') return;
           if (exemptElements.has(target) || isDialogOrPortalWrappingDialog(target)) return;
+          if (target.closest?.('[data-testid="conversation-row-sidebar"],[data-testid="project-header"],[data-testid="conversation-list-sidebar"],[data-testid="sidebar-split"]>div:first-child,[data-hover-card-popup]')) return;
           var hoverBound = measureSafeBoundaryDepth(target);
           if (hoverBound.blocked) return;
           if (isInsideDialog(target) && !isSmallHoverControl(target)) return;

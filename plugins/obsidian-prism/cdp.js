@@ -8,7 +8,7 @@ const { execFile, execFileSync, spawn } = require('child_process');
 
 const STYLE_ID = 'ag-prism-css';
 const LEGACY_STYLE_ID = 'ag-claude-style-css';
-const PLUGIN_VERSION = '1.0.8-beta.2';
+const PLUGIN_VERSION = '1.0.8-beta.3';
 const SETTING_BINDING = '__agPrismSetting';
 const LEGACY_SETTING_BINDING = '__agClaudeStyleSetting';
 const OMNI_BINDING = '__agPrismOmniCall';
@@ -35,6 +35,7 @@ const DEFAULT_CONFIG = {
   lang: 'auto',
   palette: 'obsidian',
   lightPreset: 'alabaster',
+  darkAuraStyle: 'prism',
   motionLevel: 'standard',
   targetFps: '180',
   telemetryModule: 'auto',
@@ -66,6 +67,7 @@ const DEFAULT_CONFIG = {
   codeFont: 'jetbrains',
   codeLigatures: true,
   ambientIntensity: '0',
+  darkAura: 'balanced',
   thoughtView: 'immersive',
   omniModule: 'on',
   linkTarget: 'builtin',
@@ -82,6 +84,7 @@ const VALIDATORS = {
   lang: ['auto', 'zh-CN', 'zh-TW', 'en', 'ja', 'ko', 'es', 'fr', 'de'],
   palette: ['host', 'obsidian', 'warm', 'claude'],
   lightPreset: ['crystal', 'alabaster'],
+  darkAuraStyle: ['prism', 'neon'],
   motionLevel: ['off', 'subtle', 'standard', 'ultra'],
   targetFps: ['60', '120', '180', 'native'],
   telemetryModule: ['auto', 'on', 'off'],
@@ -113,6 +116,7 @@ const VALIDATORS = {
   codeFont: ['default', 'jetbrains', 'cascadia', 'sfmono'],
   codeLigatures: 'boolean',
   ambientIntensity: ['0', '35', '70', '100'],
+  darkAura: ['subtle', 'balanced', 'vivid'],
   thoughtView: ['immersive', 'bilingual'],
   omniModule: ['on', 'off'],
   linkTarget: ['builtin', 'external'],
@@ -460,7 +464,61 @@ function matchesExpectedDaemonSignature(imageName, commandLine = '', opts = null
   return false;
 }
 
-// 单次系统探针同时获取进程映像名、启动时间与命令行，消除启动抢锁时连续拉起两次 powershell.exe
+// 解析 Windows `tasklist /FO CSV /NH`（含可选 `/V`）标准 RFC-4180 CSV 输出
+function parseWindowsTasklistCsv(csvText) {
+  const rows = [];
+  const lines = String(csvText || '').split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || !line.startsWith('"')) continue;
+    const cols = [];
+    let i = 0;
+    while (i < line.length) {
+      if (line[i] === '"') {
+        i += 1;
+        let val = '';
+        while (i < line.length) {
+          if (line[i] === '"') {
+            if (i + 1 < line.length && line[i + 1] === '"') {
+              val += '"';
+              i += 2;
+              continue;
+            }
+            i += 1;
+            break;
+          }
+          val += line[i];
+          i += 1;
+        }
+        cols.push(val);
+        while (i < line.length && line[i] !== ',') i += 1;
+        if (i < line.length && line[i] === ',') i += 1;
+      } else {
+        const comma = line.indexOf(',', i);
+        if (comma < 0) {
+          cols.push(line.slice(i).trim());
+          break;
+        }
+        cols.push(line.slice(i, comma).trim());
+        i = comma + 1;
+      }
+    }
+    if (cols.length < 2) continue;
+    const pid = parseInt(String(cols[1] || '').trim(), 10);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    rows.push({
+      imageName: String(cols[0] || '').trim(),
+      pid,
+      sessionName: cols[2] || '',
+      memUsage: cols[4] || '',
+      status: cols[5] || '',
+      windowTitle: cols.length >= 9 ? String(cols[8] || '').trim() : '',
+    });
+  }
+  return rows;
+}
+
+// 单次原生系统探针获取进程映像名、启动时间与命令行（Windows 使用原生 tasklist CSV，零 PowerShell / 零 WMI）
 function inspectProcessSync(pid, opts = null) {
   const n = Number(pid);
   if (!Number.isInteger(n) || n <= 0) return null;
@@ -469,41 +527,40 @@ function inspectProcessSync(pid, opts = null) {
   } catch (err) {
     if (!err || err.code !== 'EPERM') return null;
   }
-  const execFn = opts && typeof opts.execFileSyncFn === 'function' ? opts.execFileSyncFn : execFileSync;
+  const hasCustomExec = Boolean(opts && typeof opts.execFileSyncFn === 'function');
+  const execFn = hasCustomExec ? opts.execFileSyncFn : execFileSync;
   const platform = (opts && opts.platform) || process.platform;
   try {
     if (platform === 'win32') {
-      const psScript =
-        `$p = Get-Process -Id ${n} -ErrorAction SilentlyContinue; ` +
-        `if (-not $p) { exit 0 }; ` +
-        `$nm = [string]$p.ProcessName; ` +
-        `$st = 0; try { $st = [long]([DateTimeOffset]$p.StartTime).ToUnixTimeMilliseconds() } catch {}; ` +
-        `$cl = ''; try { $cl = [string](Get-CimInstance Win32_Process -Filter 'ProcessId = ${n}' -ErrorAction SilentlyContinue).CommandLine } catch {}; ` +
-        `Write-Output ($nm + '|' + $st + '|' + $cl)`;
+      if (n === process.pid && !hasCustomExec) {
+        const startMs = Math.max(1, Math.round(Date.now() - process.uptime() * 1000));
+        return {
+          pid: n,
+          imageName: path.basename(process.execPath) || 'node.exe',
+          startTime: startMs,
+          processStartMs: startMs,
+          commandLine: Array.isArray(process.argv) ? process.argv.join(' ') : '',
+        };
+      }
       const out = execFn(
-        'powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-Command', psScript],
+        'tasklist',
+        ['/FI', `PID eq ${n}`, '/FO', 'CSV', '/NH'],
         {
           encoding: 'utf8',
           windowsHide: true,
-          timeout: 8000,
+          timeout: 5000,
           stdio: ['ignore', 'pipe', 'ignore'],
         }
       );
-      const trimmed = String(out || '').trim();
-      if (!trimmed) return null;
-      const p1 = trimmed.indexOf('|');
-      const p2 = p1 >= 0 ? trimmed.indexOf('|', p1 + 1) : -1;
-      const imageName = p1 >= 0 ? trimmed.slice(0, p1).trim() : trimmed;
-      const processStartMs = p1 >= 0 && p2 > p1 ? Number(trimmed.slice(p1 + 1, p2)) || 0 : 0;
-      const commandLine = p2 >= 0 ? trimmed.slice(p2 + 1).trim() : '';
-      if (!imageName) return null;
+      const rows = parseWindowsTasklistCsv(out);
+      const matched = rows.find((r) => r.pid === n);
+      if (!matched || !matched.imageName) return null;
       return {
         pid: n,
-        imageName,
-        startTime: processStartMs,
-        processStartMs,
-        commandLine,
+        imageName: matched.imageName,
+        startTime: 0,
+        processStartMs: 0,
+        commandLine: '',
       };
     }
     if (platform === 'linux') {
@@ -537,6 +594,9 @@ function inspectProcessSync(pid, opts = null) {
           }
         }
       } catch {}
+      if (!processStartMs && n === process.pid && !hasCustomExec) {
+        processStartMs = Math.max(1, Math.round(Date.now() - process.uptime() * 1000));
+      }
       if (!imageName && !commandLine) return null;
       return {
         pid: n,
@@ -546,11 +606,13 @@ function inspectProcessSync(pid, opts = null) {
         commandLine,
       };
     }
-    // macOS / 其他 POSIX：使用 ps 单次读取 args 与 comm
+    // macOS / 其他 POSIX：使用 ps 单次读取 args、comm 与 lstart（UTC）
+    const posixEnv = { ...process.env, LC_ALL: 'C', TZ: 'UTC' };
     const commOut = execFn('ps', ['-p', String(n), '-o', 'comm='], {
       encoding: 'utf8',
       timeout: 2500,
       stdio: ['ignore', 'pipe', 'ignore'],
+      env: posixEnv,
     });
     const imageName = String(commOut || '').trim();
     if (!imageName) return null;
@@ -560,14 +622,35 @@ function inspectProcessSync(pid, opts = null) {
         encoding: 'utf8',
         timeout: 2500,
         stdio: ['ignore', 'pipe', 'ignore'],
+        env: posixEnv,
       });
       commandLine = String(argsOut || '').trim();
     } catch {}
+    let processStartMs = 0;
+    try {
+      const lstartOut = execFn('ps', ['-p', String(n), '-o', 'lstart='], {
+        encoding: 'utf8',
+        timeout: 2500,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        env: posixEnv,
+      });
+      const rawStart = String(lstartOut || '').trim().replace(/\s+/g, ' ');
+      if (rawStart) {
+        const hasTz = /(?:[+-]\d{2}:?\d{2}|UTC|GMT|Z)$/i.test(rawStart);
+        const parsedMs = Date.parse(hasTz ? rawStart : `${rawStart} UTC`);
+        if (Number.isFinite(parsedMs) && parsedMs > 0) {
+          processStartMs = Math.round(parsedMs);
+        }
+      }
+    } catch {}
+    if (processStartMs <= 0 && n === process.pid && !hasCustomExec) {
+      processStartMs = Math.max(1, Math.round(Date.now() - process.uptime() * 1000));
+    }
     return {
       pid: n,
       imageName,
-      startTime: 0,
-      processStartMs: 0,
+      startTime: processStartMs,
+      processStartMs,
       commandLine,
     };
   } catch {
@@ -775,87 +858,593 @@ function isMainAntigravityProcessSignature(imageName, commandLine = '') {
   return true;
 }
 
-const WIN_SHORTCUT_LIST_PS = [
-  '$ErrorActionPreference = "SilentlyContinue"',
-  '$ProgressPreference = "SilentlyContinue"',
-  '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
-  '$dirs = @()',
-  'if ($env:AG_PRISM_LNK_DIRS) {',
-  '  try { $rawDirs = ConvertFrom-Json -InputObject $env:AG_PRISM_LNK_DIRS; $dirs = if ($rawDirs -is [System.Array]) { $rawDirs } elseif ($null -ne $rawDirs) { @($rawDirs) } else { @() } } catch {}',
-  '} else {',
-  '  $dirs += [Environment]::GetFolderPath("Desktop")',
-  '  if ($env:USERPROFILE) { $dirs += (Join-Path $env:USERPROFILE "Desktop") }',
-  '  $dirs += [Environment]::GetFolderPath("Programs")',
-  '  if ($env:APPDATA) { $dirs += (Join-Path $env:APPDATA "Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar") }',
-  '  $dirs += [Environment]::GetFolderPath("CommonDesktopDirectory")',
-  '  $dirs += [Environment]::GetFolderPath("CommonPrograms")',
-  '}',
-  '$extra = @()',
-  'if ($env:AG_PRISM_LNK_EXTRA) {',
-  '  try { $rawExtra = ConvertFrom-Json -InputObject $env:AG_PRISM_LNK_EXTRA; $extra = if ($rawExtra -is [System.Array]) { $rawExtra } elseif ($null -ne $rawExtra) { @($rawExtra) } else { @() } } catch {}',
-  '}',
-  '$seen = New-Object "System.Collections.Generic.HashSet[string]" ([System.StringComparer]::OrdinalIgnoreCase)',
-  '$files = New-Object "System.Collections.Generic.List[string]"',
-  'foreach ($f in $extra) {',
-  '  if ($f -and (Test-Path -LiteralPath $f -PathType Leaf) -and $f.EndsWith(".lnk", [System.StringComparison]::OrdinalIgnoreCase)) {',
-  '    $full = [System.IO.Path]::GetFullPath($f)',
-  '    if ($seen.Add($full)) { [void]$files.Add($full) }',
-  '  }',
-  '}',
-  'foreach ($d in $dirs) {',
-  '  if (-not $d -or -not (Test-Path -LiteralPath $d -PathType Container)) { continue }',
-  '  foreach ($item in @(Get-ChildItem -LiteralPath $d -Filter "*.lnk" -File -ErrorAction SilentlyContinue)) {',
-  '    if ($seen.Add($item.FullName)) { [void]$files.Add($item.FullName) }',
-  '  }',
-  '  foreach ($sub in @(Get-ChildItem -LiteralPath $d -Directory -ErrorAction SilentlyContinue)) {',
-  '    foreach ($item2 in @(Get-ChildItem -LiteralPath $sub.FullName -Filter "*.lnk" -File -ErrorAction SilentlyContinue)) {',
-  '      if ($seen.Add($item2.FullName)) { [void]$files.Add($item2.FullName) }',
-  '    }',
-  '  }',
-  '}',
-  'if ($files.Count -eq 0) { Write-Output "[]"; exit 0 }',
-  '$ws = New-Object -ComObject WScript.Shell',
-  '$items = New-Object "System.Collections.Generic.List[object]"',
-  'foreach ($lnk in $files) {',
-  '  try {',
-  '    $sc = $ws.CreateShortcut($lnk)',
-  '    $tp = [string]$sc.TargetPath',
-  '    if (-not $tp) { continue }',
-  '    [void]$items.Add([pscustomobject]@{ lnkPath = $lnk; targetPath = $tp; arguments = [string]$sc.Arguments })',
-  '  } catch {}',
-  '}',
-  'if ($items.Count -eq 0) { Write-Output "[]" } elseif ($items.Count -eq 1) { Write-Output ("[" + ($items[0] | ConvertTo-Json -Compress) + "]") } else { $items | ConvertTo-Json -Compress }',
-].join('\n');
+// 纯 Node MS-SHLLINK (.lnk) 二进制解析与无损参数更新器（零子进程、零 PowerShell、零外部 COM）
+const LNK_HEADER_SIZE = 0x4c;
+const LNK_MAX_FILE_BYTES = 1024 * 1024;
+const LNK_SCAN_MAX_DEPTH = 3;
+const LNK_SCAN_MAX_FILES = 2000;
+const LNK_CLSID = Buffer.from([
+  0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+]);
+const LNK_FLAG_HAS_IDLIST = 0x00000001;
+const LNK_FLAG_HAS_LINK_INFO = 0x00000002;
+const LNK_FLAG_HAS_NAME = 0x00000004;
+const LNK_FLAG_HAS_RELATIVE_PATH = 0x00000008;
+const LNK_FLAG_HAS_WORKING_DIR = 0x00000010;
+const LNK_FLAG_HAS_ARGUMENTS = 0x00000020;
+const LNK_FLAG_HAS_ICON_LOCATION = 0x00000040;
+const LNK_FLAG_IS_UNICODE = 0x00000080;
 
-const WIN_SHORTCUT_APPLY_PS = [
-  '$ErrorActionPreference = "Stop"',
-  '$ProgressPreference = "SilentlyContinue"',
-  '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
-  '$updates = @()',
-  'if ($env:AG_PRISM_LNK_UPDATES) {',
-  '  $rawUpd = ConvertFrom-Json -InputObject $env:AG_PRISM_LNK_UPDATES',
-  '  $updates = if ($rawUpd -is [System.Array]) { $rawUpd } elseif ($null -ne $rawUpd) { @($rawUpd) } else { @() }',
-  '}',
-  '$ws = New-Object -ComObject WScript.Shell',
-  '$applied = New-Object "System.Collections.Generic.List[string]"',
-  '$skipped = New-Object "System.Collections.Generic.List[string]"',
-  'foreach ($u in $updates) {',
-  '  $p = [string]$u.lnkPath',
-  '  if (-not $p) { continue }',
-  '  try {',
-  '    $sc = $ws.CreateShortcut($p)',
-  '    $sc.Arguments = [string]$u.arguments',
-  '    $sc.Save()',
-  '    [void]$applied.Add($p)',
-  '  } catch {',
-  '    [void]$skipped.Add($p)',
-  '  }',
-  '}',
-  '([pscustomobject]@{ applied = $applied.ToArray(); skipped = $skipped.ToArray() }) | ConvertTo-Json -Compress',
-].join('\n');
+function normalizeFsComparePath(p) {
+  const resolved = path.resolve(String(p || ''));
+  return IS_WIN ? resolved.toLowerCase() : resolved;
+}
 
-const WIN_SHORTCUT_LIST_B64 = Buffer.from(WIN_SHORTCUT_LIST_PS, 'utf16le').toString('base64');
-const WIN_SHORTCUT_APPLY_B64 = Buffer.from(WIN_SHORTCUT_APPLY_PS, 'utf16le').toString('base64');
+function assertSafeRegularFileSync(filePath, maxBytes = LNK_MAX_FILE_BYTES, opts = null) {
+  const resolved = path.resolve(String(filePath || ''));
+  if (!resolved) throw new Error('Empty file path');
+  const parentDir = path.dirname(resolved);
+  const parentStat = fs.lstatSync(parentDir);
+  if (parentStat.isSymbolicLink() || !parentStat.isDirectory()) {
+    throw new Error(`Refusing symbolic link or non-directory parent: ${parentDir}`);
+  }
+  const st = fs.lstatSync(resolved);
+  if (st.isSymbolicLink() || !st.isFile()) {
+    throw new Error(`Refusing symbolic link or non-regular file: ${resolved}`);
+  }
+  if (!opts || opts.checkRealpath !== false) {
+    try {
+      const real = fs.realpathSync(resolved);
+      const realParent = fs.realpathSync(parentDir);
+      const expected = path.join(realParent, path.basename(resolved));
+      if (normalizeFsComparePath(real) !== normalizeFsComparePath(expected)) {
+        throw new Error(`Refusing reparse point or redirected file: ${resolved}`);
+      }
+    } catch (err) {
+      if (err && /Refusing /.test(String(err.message || ''))) throw err;
+    }
+  }
+  if (Number.isFinite(maxBytes) && maxBytes > 0 && st.size > maxBytes) {
+    throw new Error(`Refusing oversized file (${st.size} > ${maxBytes} bytes): ${resolved}`);
+  }
+  return { resolved, stat: st };
+}
+
+function readNullTerminatedAnsi(buf, start, limit) {
+  if (start < 0 || start >= limit || limit > buf.length) return '';
+  let end = start;
+  while (end < limit && buf[end] !== 0) end += 1;
+  return buf.subarray(start, end).toString('latin1');
+}
+
+function readNullTerminatedUtf16LE(buf, start, limit) {
+  if (start < 0 || start + 1 >= limit || limit > buf.length) return '';
+  let end = start;
+  while (end + 1 < limit && buf.readUInt16LE(end) !== 0) end += 2;
+  return buf.subarray(start, end).toString('utf16le');
+}
+
+function joinWinPathParts(base, suffix) {
+  const b = String(base || '');
+  const s = String(suffix || '');
+  if (!b) return s;
+  if (!s) return b;
+  if (b.endsWith('\\') || b.endsWith('/') || s.startsWith('\\') || s.startsWith('/')) {
+    return b + s;
+  }
+  return `${b}\\${s}`;
+}
+
+function expandWindowsEnvVars(rawPath, env = process.env) {
+  const s = String(rawPath || '');
+  if (!s.includes('%') || !env || typeof env !== 'object') return s;
+  const envMap = new Map();
+  for (const [k, v] of Object.entries(env)) {
+    if (typeof v === 'string') envMap.set(k.toLowerCase(), v);
+  }
+  return s.replace(/%([A-Za-z0-9_()-]+)%/g, (match, name) => {
+    const val = envMap.get(String(name).toLowerCase());
+    return typeof val === 'string' && val.length > 0 ? val : match;
+  });
+}
+
+function extractTargetFromLinkInfo(liBuf) {
+  if (!Buffer.isBuffer(liBuf) || liBuf.length < 0x1c) return '';
+  const liSize = liBuf.readUInt32LE(0);
+  const liHeaderSize = liBuf.readUInt32LE(4);
+  const liFlags = liBuf.readUInt32LE(8);
+  if (liSize < 0x1c || liHeaderSize < 0x1c || liSize > liBuf.length) return '';
+
+  const hasUniOffsets = liHeaderSize >= 0x24 && liBuf.length >= 0x24;
+  const commonSuffixOff = liBuf.readUInt32LE(24);
+  let commonSuffix = '';
+  if (hasUniOffsets) {
+    const commonSuffixUniOff = liBuf.readUInt32LE(32);
+    if (commonSuffixUniOff >= liHeaderSize && commonSuffixUniOff < liSize) {
+      commonSuffix = readNullTerminatedUtf16LE(liBuf, commonSuffixUniOff, liSize);
+    }
+  }
+  if (!commonSuffix && commonSuffixOff >= liHeaderSize && commonSuffixOff < liSize) {
+    commonSuffix = readNullTerminatedAnsi(liBuf, commonSuffixOff, liSize);
+  }
+
+  if (liFlags & 0x01) {
+    let localBase = '';
+    if (hasUniOffsets) {
+      const localBaseUniOff = liBuf.readUInt32LE(28);
+      if (localBaseUniOff >= liHeaderSize && localBaseUniOff < liSize) {
+        localBase = readNullTerminatedUtf16LE(liBuf, localBaseUniOff, liSize);
+      }
+    }
+    if (!localBase) {
+      const localBaseOff = liBuf.readUInt32LE(16);
+      if (localBaseOff >= liHeaderSize && localBaseOff < liSize) {
+        localBase = readNullTerminatedAnsi(liBuf, localBaseOff, liSize);
+      }
+    }
+    if (localBase) return joinWinPathParts(localBase, commonSuffix);
+  }
+
+  if (liFlags & 0x02) {
+    const cnrlOff = liBuf.readUInt32LE(20);
+    if (cnrlOff >= liHeaderSize && cnrlOff + 20 <= liSize) {
+      const cnrlSize = liBuf.readUInt32LE(cnrlOff);
+      const cnrlEnd = Math.min(liSize, cnrlOff + cnrlSize);
+      if (cnrlSize >= 20 && cnrlEnd <= liSize) {
+        const netNameOff = liBuf.readUInt32LE(cnrlOff + 8);
+        let netName = '';
+        if (netNameOff > 0x14 && cnrlOff + 24 <= cnrlEnd) {
+          const netNameUniOff = liBuf.readUInt32LE(cnrlOff + 20);
+          if (netNameUniOff > 0 && cnrlOff + netNameUniOff < cnrlEnd) {
+            netName = readNullTerminatedUtf16LE(liBuf, cnrlOff + netNameUniOff, cnrlEnd);
+          }
+        }
+        if (!netName && netNameOff >= 20 && cnrlOff + netNameOff < cnrlEnd) {
+          netName = readNullTerminatedAnsi(liBuf, cnrlOff + netNameOff, cnrlEnd);
+        }
+        if (netName) return joinWinPathParts(netName, commonSuffix);
+      }
+    }
+  }
+  return '';
+}
+
+function extractTargetFromExtraData(extraBuf) {
+  if (!Buffer.isBuffer(extraBuf) || extraBuf.length < 4) return '';
+  let off = 0;
+  while (off + 4 <= extraBuf.length) {
+    const blockSize = extraBuf.readUInt32LE(off);
+    if (blockSize < 4) break;
+    if (off + blockSize > extraBuf.length) break;
+    if (blockSize >= 8) {
+      const sig = extraBuf.readUInt32LE(off + 4);
+      // EnvironmentVariableDataBlock (MS-SHLLINK 2.5.4)
+      if (sig === 0xa0000001 && blockSize >= 0x0314) {
+        const uni = readNullTerminatedUtf16LE(extraBuf, off + 268, off + 268 + 520);
+        if (uni) return expandWindowsEnvVars(uni);
+        const ansi = readNullTerminatedAnsi(extraBuf, off + 8, off + 8 + 260);
+        if (ansi) return expandWindowsEnvVars(ansi);
+      }
+    }
+    off += blockSize;
+  }
+  return '';
+}
+
+function extractTargetFromIdList(idListBuf) {
+  if (!Buffer.isBuffer(idListBuf) || idListBuf.length < 4) return '';
+  let off = 0;
+  let drive = '';
+  const segments = [];
+  while (off + 2 <= idListBuf.length) {
+    const itemSize = idListBuf.readUInt16LE(off);
+    if (itemSize === 0) break;
+    if (itemSize < 3 || off + itemSize > idListBuf.length) break;
+    const item = idListBuf.subarray(off, off + itemSize);
+    const type = item[2];
+    if (type >= 0x20 && type <= 0x2f && itemSize >= 6) {
+      const drv = readNullTerminatedAnsi(item, 3, itemSize).trim();
+      if (/^[A-Za-z]:\\?$/.test(drv)) {
+        drive = drv.endsWith('\\') ? drv : `${drv}\\`;
+      }
+    } else if (type >= 0x30 && type <= 0x3f && itemSize >= 16) {
+      let name = '';
+      if (itemSize >= 20) {
+        const extOff = item.readUInt16LE(itemSize - 2);
+        if (extOff >= 14 && extOff + 10 <= itemSize - 2) {
+          const extSize = item.readUInt16LE(extOff);
+          const extVer = item.readUInt16LE(extOff + 2);
+          const extSig = item.readUInt32LE(extOff + 4);
+          if (extSig === 0xbeef0004 && extSize >= 16 && extOff + extSize <= itemSize) {
+            let nameOff = 0;
+            if (extVer === 3) nameOff = extOff + 20;
+            else if (extVer === 7) nameOff = extOff + 38;
+            else if (extVer === 8) nameOff = extOff + 42;
+            else if (extVer >= 9) nameOff = extOff + 46;
+            if (nameOff > 0 && nameOff + 2 <= extOff + extSize) {
+              name = readNullTerminatedUtf16LE(item, nameOff, extOff + extSize);
+            }
+          }
+        }
+      }
+      if (!name) {
+        if ((type & 0x04) !== 0) {
+          name = readNullTerminatedUtf16LE(item, 14, itemSize);
+        } else {
+          name = readNullTerminatedAnsi(item, 14, itemSize);
+        }
+      }
+      if (name) segments.push(name);
+    }
+    off += itemSize;
+  }
+  if (!drive || segments.length === 0) return '';
+  return `${drive}${segments.join('\\')}`;
+}
+
+function parseWindowsLnkBuffer(buf, lnkPath = '') {
+  if (!Buffer.isBuffer(buf) || buf.length < LNK_HEADER_SIZE) {
+    throw new Error('Invalid .lnk file: shorter than 76-byte ShellLinkHeader');
+  }
+  if (buf.length > LNK_MAX_FILE_BYTES) {
+    throw new Error(`Invalid .lnk file: exceeds ${LNK_MAX_FILE_BYTES} bytes`);
+  }
+  const headerSize = buf.readUInt32LE(0);
+  if (headerSize !== LNK_HEADER_SIZE) {
+    throw new Error(`Invalid .lnk HeaderSize: 0x${headerSize.toString(16)}`);
+  }
+  if (!buf.subarray(4, 20).equals(LNK_CLSID)) {
+    throw new Error('Invalid .lnk LinkCLSID');
+  }
+  const flags = buf.readUInt32LE(20);
+  const isUnicode = Boolean(flags & LNK_FLAG_IS_UNICODE);
+  let offset = LNK_HEADER_SIZE;
+
+  let idListStart = offset;
+  let idListEnd = offset;
+  let idListPayload = null;
+  if (flags & LNK_FLAG_HAS_IDLIST) {
+    if (offset + 2 > buf.length) throw new Error('Truncated LinkTargetIDList size');
+    const idListSize = buf.readUInt16LE(offset);
+    if (offset + 2 + idListSize > buf.length) throw new Error('Truncated LinkTargetIDList payload');
+    idListStart = offset;
+    idListPayload = buf.subarray(offset + 2, offset + 2 + idListSize);
+    offset += 2 + idListSize;
+    idListEnd = offset;
+  }
+
+  let linkInfoStart = offset;
+  let linkInfoEnd = offset;
+  let linkInfoBuf = null;
+  if (flags & LNK_FLAG_HAS_LINK_INFO) {
+    if (offset + 4 > buf.length) throw new Error('Truncated LinkInfo size');
+    const liSize = buf.readUInt32LE(offset);
+    if (liSize < 0x1c || offset + liSize > buf.length) throw new Error('Invalid or truncated LinkInfo');
+    linkInfoStart = offset;
+    linkInfoBuf = buf.subarray(offset, offset + liSize);
+    offset += liSize;
+    linkInfoEnd = offset;
+  }
+
+  const stringDataStart = offset;
+  const stringSpecs = [
+    [LNK_FLAG_HAS_NAME, 'name'],
+    [LNK_FLAG_HAS_RELATIVE_PATH, 'relativePath'],
+    [LNK_FLAG_HAS_WORKING_DIR, 'workingDir'],
+    [LNK_FLAG_HAS_ARGUMENTS, 'arguments'],
+    [LNK_FLAG_HAS_ICON_LOCATION, 'iconLocation'],
+  ];
+  const strings = {
+    name: null,
+    relativePath: null,
+    workingDir: null,
+    arguments: null,
+    iconLocation: null,
+  };
+  const stringOffsets = {};
+  let argsStart = -1;
+  let argsEnd = -1;
+
+  for (const [bit, field] of stringSpecs) {
+    if (field === 'arguments' && !(flags & bit)) {
+      argsStart = offset;
+      argsEnd = offset;
+    }
+    if (!(flags & bit)) continue;
+    if (offset + 2 > buf.length) throw new Error(`Truncated StringData count for ${field}`);
+    const countChars = buf.readUInt16LE(offset);
+    const byteLen = isUnicode ? countChars * 2 : countChars;
+    if (offset + 2 + byteLen > buf.length) throw new Error(`Truncated StringData payload for ${field}`);
+    const fieldStart = offset;
+    const rawStr = buf.subarray(offset + 2, offset + 2 + byteLen).toString(isUnicode ? 'utf16le' : 'latin1');
+    offset += 2 + byteLen;
+    strings[field] = rawStr;
+    stringOffsets[field] = { start: fieldStart, end: offset, countChars };
+    if (field === 'arguments') {
+      argsStart = fieldStart;
+      argsEnd = offset;
+    }
+  }
+
+  const extraDataStart = offset;
+  const extraDataBuf = buf.subarray(extraDataStart);
+
+  // 4 级目标路径解析：LinkInfo -> ExtraData(EnvironmentVariableDataBlock) -> RELATIVE_PATH -> LinkTargetIDList
+  let targetPath = linkInfoBuf ? extractTargetFromLinkInfo(linkInfoBuf) : '';
+  if (!targetPath) {
+    targetPath = extractTargetFromExtraData(extraDataBuf);
+  }
+  if (!targetPath && strings.relativePath) {
+    if (lnkPath) {
+      targetPath = path.win32.resolve(path.win32.dirname(String(lnkPath)), strings.relativePath);
+    } else {
+      targetPath = strings.relativePath;
+    }
+  }
+  if (!targetPath && idListPayload) {
+    targetPath = extractTargetFromIdList(idListPayload);
+  }
+  // 当 LinkInfo 仅含 ANSI 且含高位字节（非纯 ASCII 本地代码页）时，优先用 UTF-16LE 的 RELATIVE_PATH / IDList 还原准确 Unicode 路径
+  if (targetPath && /[^\x00-\x7f]/.test(targetPath) && linkInfoBuf && linkInfoBuf.readUInt32LE(4) < 0x24) {
+    const unicodeFallback =
+      extractTargetFromExtraData(extraDataBuf) ||
+      (isUnicode && strings.relativePath && lnkPath
+        ? path.win32.resolve(path.win32.dirname(String(lnkPath)), strings.relativePath)
+        : '') ||
+      (idListPayload ? extractTargetFromIdList(idListPayload) : '');
+    if (unicodeFallback) targetPath = unicodeFallback;
+  }
+
+  return {
+    flags,
+    isUnicode,
+    hasArguments: Boolean(flags & LNK_FLAG_HAS_ARGUMENTS),
+    targetPath: String(targetPath || ''),
+    arguments: strings.arguments || '',
+    name: strings.name,
+    relativePath: strings.relativePath,
+    workingDir: strings.workingDir,
+    iconLocation: strings.iconLocation,
+    offsets: {
+      idListStart,
+      idListEnd,
+      linkInfoStart,
+      linkInfoEnd,
+      stringDataStart,
+      argsStart,
+      argsEnd,
+      extraDataStart,
+      stringOffsets,
+    },
+  };
+}
+
+function encodeLnkStringDataField(text, isUnicode) {
+  const s = String(text || '');
+  if (isUnicode) {
+    if (s.length > 0xffff) {
+      throw new Error('StringData field exceeds MS-SHLLINK 65535 UTF-16 code units limit');
+    }
+    const header = Buffer.allocUnsafe(2);
+    header.writeUInt16LE(s.length, 0);
+    return Buffer.concat([header, Buffer.from(s, 'utf16le')]);
+  }
+  const payload = Buffer.from(s, 'latin1');
+  if (payload.length > 0xffff) {
+    throw new Error('StringData field exceeds MS-SHLLINK 65535 ANSI bytes limit');
+  }
+  const header = Buffer.allocUnsafe(2);
+  header.writeUInt16LE(payload.length, 0);
+  return Buffer.concat([header, payload]);
+}
+
+// 严格遵守 MS-SHLLINK 规范更新 COMMAND_LINE_ARGUMENTS，100% 原样保留其余 Header/IDList/LinkInfo/StringData/ExtraData 字节
+function updateWindowsLnkArguments(buf, nextArguments) {
+  const parsed = parseWindowsLnkBuffer(buf);
+  const nextStr = String(nextArguments || '');
+  const wantHasArgs = nextStr.length > 0;
+  const needUnicodeUpgrade = !parsed.isUnicode && wantHasArgs && /[^\x00-\x7f]/.test(nextStr);
+
+  if (!needUnicodeUpgrade) {
+    const nextFlags = wantHasArgs
+      ? (parsed.flags | LNK_FLAG_HAS_ARGUMENTS) >>> 0
+      : (parsed.flags & ~LNK_FLAG_HAS_ARGUMENTS) >>> 0;
+    const prefix = Buffer.from(buf.subarray(0, parsed.offsets.argsStart));
+    prefix.writeUInt32LE(nextFlags, 20);
+    const suffix = buf.subarray(parsed.offsets.argsEnd);
+    const argChunk = wantHasArgs ? encodeLnkStringDataField(nextStr, parsed.isUnicode) : Buffer.alloc(0);
+    return Buffer.concat([prefix, argChunk, suffix]);
+  }
+
+  // ANSI .lnk 写入非 ASCII 参数时，升格 IsUnicode 并无损转码现有 StringData 字段，保留 Header/IDList/LinkInfo/ExtraData 原样
+  const nextFlags = ((parsed.flags | LNK_FLAG_IS_UNICODE | LNK_FLAG_HAS_ARGUMENTS) >>> 0);
+  const beforeStrings = Buffer.from(buf.subarray(0, parsed.offsets.stringDataStart));
+  beforeStrings.writeUInt32LE(nextFlags, 20);
+  const parts = [beforeStrings];
+  if (parsed.flags & LNK_FLAG_HAS_NAME) parts.push(encodeLnkStringDataField(parsed.name || '', true));
+  if (parsed.flags & LNK_FLAG_HAS_RELATIVE_PATH) parts.push(encodeLnkStringDataField(parsed.relativePath || '', true));
+  if (parsed.flags & LNK_FLAG_HAS_WORKING_DIR) parts.push(encodeLnkStringDataField(parsed.workingDir || '', true));
+  parts.push(encodeLnkStringDataField(nextStr, true));
+  if (parsed.flags & LNK_FLAG_HAS_ICON_LOCATION) parts.push(encodeLnkStringDataField(parsed.iconLocation || '', true));
+  parts.push(buf.subarray(parsed.offsets.extraDataStart));
+  return Buffer.concat(parts);
+}
+
+function readWindowsLnkFileSync(lnkPath) {
+  const { resolved } = assertSafeRegularFileSync(lnkPath, LNK_MAX_FILE_BYTES);
+  const buf = fs.readFileSync(resolved);
+  const parsed = parseWindowsLnkBuffer(buf, resolved);
+  return {
+    lnkPath: resolved,
+    targetPath: parsed.targetPath,
+    arguments: parsed.arguments,
+    parsed,
+  };
+}
+
+function writeFileAtomicallyNoSymlinkSync(filePath, data, opts = null) {
+  const resolved = path.resolve(String(filePath || ''));
+  const dir = path.dirname(resolved);
+  const dirStat = fs.lstatSync(dir);
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+    throw new Error(`Refusing symbolic link directory: ${dir}`);
+  }
+  if (fs.existsSync(resolved)) {
+    assertSafeRegularFileSync(resolved, (opts && opts.maxBytes) || LNK_MAX_FILE_BYTES);
+  }
+  const mode = (opts && opts.mode) || 0o600;
+  const tmpPath = path.join(dir, `.${path.basename(resolved)}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+  let fd = null;
+  try {
+    fd = fs.openSync(tmpPath, 'wx', mode);
+    if (Buffer.isBuffer(data)) {
+      fs.writeFileSync(fd, data);
+    } else {
+      fs.writeFileSync(fd, String(data), 'utf8');
+    }
+    try {
+      fs.fsyncSync(fd);
+    } catch {}
+    fs.closeSync(fd);
+    fd = null;
+
+    let renamed = false;
+    let lastErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (fs.existsSync(resolved)) {
+        assertSafeRegularFileSync(resolved, (opts && opts.maxBytes) || LNK_MAX_FILE_BYTES);
+      }
+      try {
+        fs.renameSync(tmpPath, resolved);
+        renamed = true;
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (!IS_WIN || !['EBUSY', 'EPERM', 'EACCES', 'EEXIST'].includes(err && err.code)) {
+          throw err;
+        }
+      }
+    }
+    if (!renamed) {
+      if (IS_WIN && ['EBUSY', 'EPERM', 'EACCES', 'EEXIST'].includes(lastErr && lastErr.code)) {
+        if (fs.existsSync(resolved)) {
+          assertSafeRegularFileSync(resolved, (opts && opts.maxBytes) || LNK_MAX_FILE_BYTES);
+        }
+        fs.copyFileSync(tmpPath, resolved);
+        try { fs.unlinkSync(tmpPath); } catch {}
+      } else {
+        throw lastErr;
+      }
+    }
+  } catch (err) {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch {}
+    }
+    try { fs.unlinkSync(tmpPath); } catch {}
+    throw err;
+  }
+}
+
+function writeWindowsLnkArgumentsSync(lnkPath, nextArguments) {
+  const { resolved } = assertSafeRegularFileSync(lnkPath, LNK_MAX_FILE_BYTES);
+  const origBuf = fs.readFileSync(resolved);
+  const nextBuf = updateWindowsLnkArguments(origBuf, nextArguments);
+  // 写盘前自检：确保新二进制可被严格回读且参数 100% 匹配
+  const verify = parseWindowsLnkBuffer(nextBuf, resolved);
+  if (verify.arguments !== String(nextArguments || '')) {
+    throw new Error('Updated .lnk verification mismatch');
+  }
+  writeFileAtomicallyNoSymlinkSync(resolved, nextBuf, { maxBytes: LNK_MAX_FILE_BYTES });
+  return { lnkPath: resolved, bytes: nextBuf.length, arguments: verify.arguments };
+}
+
+function getDefaultWindowsShortcutDirs(env = process.env) {
+  const e = env || process.env;
+  const userProfile = e.USERPROFILE || os.homedir();
+  const appData = e.APPDATA || path.join(userProfile, 'AppData', 'Roaming');
+  const publicDir = e.PUBLIC || 'C:\\Users\\Public';
+  const programData = e.ProgramData || 'C:\\ProgramData';
+  const rawDirs = [
+    path.join(userProfile, 'Desktop'),
+    e.OneDrive ? path.join(e.OneDrive, 'Desktop') : '',
+    e.OneDriveConsumer ? path.join(e.OneDriveConsumer, 'Desktop') : '',
+    path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
+    path.join(appData, 'Microsoft', 'Internet Explorer', 'Quick Launch', 'User Pinned', 'TaskBar'),
+    path.join(publicDir, 'Desktop'),
+    path.join(programData, 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
+  ].filter(Boolean);
+  const seen = new Set();
+  const uniq = [];
+  for (const d of rawDirs) {
+    const resolved = path.resolve(d);
+    const key = resolved.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniq.push(resolved);
+  }
+  return uniq;
+}
+
+function collectWindowsLnkFilesSync(searchDirs, extraFiles) {
+  const dirs = Array.isArray(searchDirs)
+    ? searchDirs.filter((d) => typeof d === 'string' && d.trim()).map((d) => path.resolve(d))
+    : getDefaultWindowsShortcutDirs();
+  const extras = Array.isArray(extraFiles) ? extraFiles : [];
+  const seenFiles = new Set();
+  const seenDirs = new Set();
+  const files = [];
+
+  const pushIfValidLnk = (candidate) => {
+    if (files.length >= LNK_SCAN_MAX_FILES) return;
+    if (!candidate || !String(candidate).toLowerCase().endsWith('.lnk')) return;
+    try {
+      const { resolved } = assertSafeRegularFileSync(candidate, LNK_MAX_FILE_BYTES);
+      const key = resolved.toLowerCase();
+      if (seenFiles.has(key)) return;
+      seenFiles.add(key);
+      files.push(resolved);
+    } catch {}
+  };
+
+  for (const f of extras) pushIfValidLnk(f);
+
+  const walkDir = (dirPath, depth) => {
+    if (depth > LNK_SCAN_MAX_DEPTH || files.length >= LNK_SCAN_MAX_FILES) return;
+    let resolvedDir;
+    try {
+      resolvedDir = path.resolve(dirPath);
+      const dirKey = resolvedDir.toLowerCase();
+      if (seenDirs.has(dirKey)) return;
+      const st = fs.lstatSync(resolvedDir);
+      if (st.isSymbolicLink() || !st.isDirectory()) return;
+      seenDirs.add(dirKey);
+    } catch {
+      return;
+    }
+    let entries;
+    try {
+      entries = fs.readdirSync(resolvedDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (files.length >= LNK_SCAN_MAX_FILES) break;
+      if (!entry || entry.isSymbolicLink()) continue;
+      const fullPath = path.join(resolvedDir, entry.name);
+      if (entry.isDirectory()) {
+        if (depth < LNK_SCAN_MAX_DEPTH) {
+          walkDir(fullPath, depth + 1);
+        }
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.lnk')) {
+        pushIfValidLnk(fullPath);
+      }
+    }
+  };
+
+  for (const d of dirs) walkDir(d, 0);
+  return files;
+}
 
 function readPatchedShortcutsRecord(pluginDir) {
   if (!pluginDir) return [];
@@ -887,92 +1476,48 @@ function writePatchedShortcutsRecord(pluginDir, pathsList) {
 }
 
 function runWindowsShortcutAdapter(searchDirs, extraFiles) {
-  const env = { ...process.env };
-  if (Array.isArray(searchDirs)) {
-    env.AG_PRISM_LNK_DIRS = JSON.stringify(searchDirs.map((d) => path.resolve(d)));
-  } else {
-    delete env.AG_PRISM_LNK_DIRS;
+  const lnkFiles = collectWindowsLnkFilesSync(searchDirs, extraFiles);
+  const entries = [];
+  for (const lnkPath of lnkFiles) {
+    try {
+      const info = readWindowsLnkFileSync(lnkPath);
+      if (!info.targetPath) continue;
+      entries.push({
+        lnkPath: info.lnkPath,
+        targetPath: info.targetPath,
+        arguments: info.arguments,
+      });
+    } catch {}
   }
-  if (Array.isArray(extraFiles) && extraFiles.length > 0) {
-    env.AG_PRISM_LNK_EXTRA = JSON.stringify(extraFiles.map((f) => path.resolve(f)));
-  } else {
-    delete env.AG_PRISM_LNK_EXTRA;
-  }
-  const listOut = execFileSync(
-    'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', WIN_SHORTCUT_LIST_B64],
-    { encoding: 'utf8', env, windowsHide: true, timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] }
-  );
-  const rawJson = String(listOut || '').trim();
-  const parsed = rawJson ? JSON.parse(rawJson) : [];
-  const entries = Array.isArray(parsed) ? parsed : [parsed];
   return {
     entries,
     applyUpdates(updates) {
       if (!Array.isArray(updates) || updates.length === 0) {
         return { applied: [], skipped: [] };
       }
-      const applyEnv = { ...process.env, AG_PRISM_LNK_UPDATES: JSON.stringify(updates) };
-      const applyOut = execFileSync(
-        'powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', WIN_SHORTCUT_APPLY_B64],
-        { encoding: 'utf8', env: applyEnv, windowsHide: true, timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] }
-      );
-      const res = JSON.parse(String(applyOut || '{}').trim() || '{}');
-      return {
-        applied: Array.isArray(res?.applied) ? res.applied : [],
-        skipped: Array.isArray(res?.skipped) ? res.skipped : [],
-      };
+      const applied = [];
+      const skipped = [];
+      for (const u of updates) {
+        const p = String((u && u.lnkPath) || '').trim();
+        if (!p) continue;
+        try {
+          writeWindowsLnkArgumentsSync(p, String((u && u.arguments) || ''));
+          applied.push(p);
+        } catch {
+          skipped.push(p);
+        }
+      }
+      return { applied, skipped };
     },
   };
 }
 
-function execFileTextAsync(file, args, opts) {
-  return new Promise((resolve, reject) => {
-    execFile(file, args, { encoding: 'utf8', windowsHide: true, ...opts }, (err, stdout) => {
-      if (err) reject(err);
-      else resolve(String(stdout || ''));
-    });
-  });
-}
-
 async function runWindowsShortcutAdapterAsync(searchDirs, extraFiles) {
-  const env = { ...process.env };
-  if (Array.isArray(searchDirs)) {
-    env.AG_PRISM_LNK_DIRS = JSON.stringify(searchDirs.map((d) => path.resolve(d)));
-  } else {
-    delete env.AG_PRISM_LNK_DIRS;
-  }
-  if (Array.isArray(extraFiles) && extraFiles.length > 0) {
-    env.AG_PRISM_LNK_EXTRA = JSON.stringify(extraFiles.map((f) => path.resolve(f)));
-  } else {
-    delete env.AG_PRISM_LNK_EXTRA;
-  }
-  const listOut = await execFileTextAsync(
-    'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', WIN_SHORTCUT_LIST_B64],
-    { env, timeout: 10000 }
-  );
-  const rawJson = String(listOut || '').trim();
-  const parsed = rawJson ? JSON.parse(rawJson) : [];
-  const entries = Array.isArray(parsed) ? parsed : [parsed];
+  const syncAdapter = runWindowsShortcutAdapter(searchDirs, extraFiles);
   return {
-    entries,
+    entries: syncAdapter.entries,
     async applyUpdates(updates) {
-      if (!Array.isArray(updates) || updates.length === 0) {
-        return { applied: [], skipped: [] };
-      }
-      const applyEnv = { ...process.env, AG_PRISM_LNK_UPDATES: JSON.stringify(updates) };
-      const applyOut = await execFileTextAsync(
-        'powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', WIN_SHORTCUT_APPLY_B64],
-        { env: applyEnv, timeout: 10000 }
-      );
-      const res = JSON.parse(String(applyOut || '{}').trim() || '{}');
-      return {
-        applied: Array.isArray(res?.applied) ? res.applied : [],
-        skipped: Array.isArray(res?.skipped) ? res.skipped : [],
-      };
+      return syncAdapter.applyUpdates(updates);
     },
   };
 }
@@ -1709,39 +2254,253 @@ function restoreAntigravityShortcutsCdpFlag(opts = {}) {
   }
 }
 
-const WIN_HOST_PROBE_PS = [
-  '$ErrorActionPreference = "SilentlyContinue"',
-  '$ProgressPreference = "SilentlyContinue"',
-  '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
-  '$procs = @(Get-Process -Name "Antigravity" -ErrorAction SilentlyContinue)',
-  'if ($procs.Count -eq 0) { Write-Output "[]"; exit 0 }',
-  '$filter = ($procs | ForEach-Object { "ProcessId = " + $_.Id }) -join " OR "',
-  '$cimMap = @{}',
-  'try {',
-  '  foreach ($c in @(Get-CimInstance Win32_Process -Filter $filter -ErrorAction SilentlyContinue)) {',
-  '    $cimMap[[int]$c.ProcessId] = $c',
-  '  }',
-  '} catch {}',
-  '$out = @(foreach ($p in $procs) {',
-  '  $st = 0',
-  '  try { $st = [long]([DateTimeOffset]$p.StartTime).ToUnixTimeMilliseconds() } catch {}',
-  '  $cim = $cimMap[[int]$p.Id]',
-  '  $exe = ""',
-  '  try { $exe = [string]$p.Path } catch {}',
-  '  if (-not $exe -and $cim) { $exe = [string]$cim.ExecutablePath }',
-  '  $cmd = if ($cim) { [string]$cim.CommandLine } else { "" }',
-  '  [pscustomobject]@{',
-  '    pid = [int]$p.Id',
-  '    imageName = [string]$p.ProcessName',
-  '    startMs = $st',
-  '    exePath = $exe',
-  '    commandLine = $cmd',
-  '  }',
-  '})',
-  'if ($out.Count -eq 0) { Write-Output "[]" } elseif ($out.Count -eq 1) { Write-Output ("[" + ($out[0] | ConvertTo-Json -Compress) + "]") } else { $out | ConvertTo-Json -Compress }',
-].join('\n');
+function isElectronHostBinaryPath(rawPath) {
+  const s = String(rawPath || '').trim();
+  if (!s) return false;
+  const base = path.basename(s);
+  if (/^(?:antigravity|agy)(?:\.exe)?$/i.test(base)) return true;
+  if (/Antigravity(?:\s+Helper(?:\s+\([^)]+\))?)?\.app[\\/]Contents[\\/]MacOS[\\/]/i.test(s)) return true;
+  return false;
+}
 
-const WIN_HOST_PROBE_B64 = Buffer.from(WIN_HOST_PROBE_PS, 'utf16le').toString('base64');
+function resolveWindowsDetachedNodeRuntime(opts = {}) {
+  const raw = String(opts.nodeExecPath || process.execPath || '').trim();
+  const existsFn = typeof opts.existsSync === 'function' ? opts.existsSync : fs.existsSync;
+  const execFn = typeof opts.execFileSyncFn === 'function' ? opts.execFileSyncFn : execFileSync;
+  if (raw && !isElectronHostBinaryPath(raw)) {
+    return { execPath: path.resolve(raw), useElectronAsNode: false };
+  }
+  const candidates = [];
+  try {
+    const out = execFn('where.exe', ['node.exe'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    for (const line of String(out || '').split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed) candidates.push(trimmed);
+    }
+  } catch {}
+  for (const cand of candidates) {
+    if (isElectronHostBinaryPath(cand)) continue;
+    try {
+      if (existsFn(cand)) {
+        return { execPath: path.resolve(cand), useElectronAsNode: false };
+      }
+    } catch {}
+  }
+  if (raw) {
+    return { execPath: path.resolve(raw), useElectronAsNode: true };
+  }
+  return { execPath: process.execPath, useElectronAsNode: isElectronHostBinaryPath(process.execPath) };
+}
+
+function normalizeLoopbackPort(rawPort) {
+  const n = Number(rawPort);
+  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : 0;
+}
+
+function readPortFromCustomOrDefaultFile(portFile = null) {
+  if (portFile) {
+    try {
+      const text = fs.readFileSync(portFile, 'utf8');
+      const port = parseInt(text.split(/\r?\n/)[0].trim(), 10);
+      return normalizeLoopbackPort(port) || null;
+    } catch {
+      return null;
+    }
+  }
+  return normalizeLoopbackPort(readPort()) || null;
+}
+
+function isAntigravityCdpVersionInfo(info, port) {
+  if (!info || typeof info !== 'object') return false;
+  const browserSig = `${String(info.Browser || '')} ${String(info['User-Agent'] || '')}`;
+  if (/\bEdg\//i.test(browserSig) && !/\bAntigravity\b/i.test(browserSig)) {
+    return false;
+  }
+  const wsUrl = typeof info.webSocketDebuggerUrl === 'string' ? info.webSocketDebuggerUrl.trim() : '';
+  if (!wsUrl) return false;
+  try {
+    const parsed = new URL(wsUrl);
+    const hostOk = parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost' || parsed.hostname === '[::1]';
+    const portNum = parsed.port ? Number(parsed.port) : 80;
+    return parsed.protocol === 'ws:' && hostOk && portNum === port && parsed.pathname.startsWith('/devtools/browser/');
+  } catch {
+    return false;
+  }
+}
+
+async function probeLoopbackCdpVersionAsync(port, opts = {}) {
+  const p = normalizeLoopbackPort(port);
+  if (!p) return false;
+  if (typeof opts.probeCdpVersionAsync === 'function') {
+    return Boolean(await opts.probeCdpVersionAsync(p));
+  }
+  const fetchImpl = typeof opts.fetchImpl === 'function' ? opts.fetchImpl : globalThis.fetch;
+  if (typeof fetchImpl !== 'function') return false;
+  const timeoutMs = Math.max(200, Math.min(5000, Number(opts.timeoutMs) || 1000));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(`http://127.0.0.1:${p}/json/version`, { signal: controller.signal });
+    if (!res || !res.ok) return false;
+    const info = await res.json();
+    return isAntigravityCdpVersionInfo(info, p);
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function probeLoopbackCdpVersionSync(port, opts = {}) {
+  const p = normalizeLoopbackPort(port);
+  if (!p) return false;
+  if (typeof opts.probeCdpVersionSync === 'function') {
+    return Boolean(opts.probeCdpVersionSync(p));
+  }
+  const timeoutMs = Math.max(200, Math.min(4000, Number(opts.timeoutMs) || 1000));
+  const runtime = resolveWindowsDetachedNodeRuntime(opts);
+  const env = { ...process.env };
+  if (runtime.useElectronAsNode) env.ELECTRON_RUN_AS_NODE = '1';
+  else delete env.ELECTRON_RUN_AS_NODE;
+  const probeCode = [
+    "const http = require('node:http');",
+    `const req = http.get({ host: '127.0.0.1', port: ${p}, path: '/json/version', timeout: ${timeoutMs} }, (res) => {`,
+    "  if (res.statusCode !== 200) { process.exit(1); }",
+    "  let body = '';",
+    "  res.setEncoding('utf8');",
+    "  res.on('data', (c) => { body += c; if (body.length > 65536) process.exit(1); });",
+    "  res.on('end', () => {",
+    "    try {",
+    "      const info = JSON.parse(body);",
+    "      const sig = String(info.Browser || '') + ' ' + String(info['User-Agent'] || '');",
+    "      if (/\\bEdg\\//i.test(sig) && !/\\bAntigravity\\b/i.test(sig)) process.exit(1);",
+    "      const u = new URL(String(info.webSocketDebuggerUrl || ''));",
+    `      const ok = u.protocol === 'ws:' && (u.hostname === '127.0.0.1' || u.hostname === 'localhost' || u.hostname === '[::1]') && Number(u.port || 80) === ${p} && u.pathname.startsWith('/devtools/browser/');`,
+    "      process.exit(ok ? 0 : 1);",
+    "    } catch { process.exit(1); }",
+    "  });",
+    "});",
+    "req.on('timeout', () => { try { req.destroy(); } catch {} process.exit(1); });",
+    "req.on('error', () => process.exit(1));",
+  ].join(' ');
+  try {
+    execFileSync(runtime.execPath, ['-e', probeCode], {
+      env,
+      windowsHide: true,
+      timeout: timeoutMs + 1000,
+      stdio: 'ignore',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveInstalledAntigravityExeWin(opts = {}) {
+  const env = (opts && opts.env) || process.env;
+  const existsFn = typeof opts.existsSync === 'function' ? opts.existsSync : fs.existsSync;
+  if (opts && typeof opts.exePath === 'string' && opts.exePath.trim()) {
+    return opts.exePath.trim();
+  }
+  const localApp = (env && env.LOCALAPPDATA) || path.join(os.homedir(), 'AppData', 'Local');
+  const progFiles = (env && env.ProgramFiles) || 'C:\\Program Files';
+  const candidates = [
+    path.join(localApp, 'Programs', 'antigravity', 'Antigravity.exe'),
+    path.join(localApp, 'antigravity', 'Antigravity.exe'),
+    path.join(progFiles, 'Antigravity', 'Antigravity.exe'),
+  ];
+  if (isElectronHostBinaryPath(process.execPath) && String(process.execPath).toLowerCase().endsWith('.exe')) {
+    candidates.unshift(process.execPath);
+  }
+  for (const c of candidates) {
+    try {
+      if (existsFn(c)) return c;
+    } catch {}
+  }
+  return candidates[0];
+}
+
+function collectKnownPrismDaemonPids(opts = {}) {
+  const excluded = new Set([process.pid]);
+  if (Array.isArray(opts.excludePids)) {
+    for (const p of opts.excludePids) {
+      const n = Number(p);
+      if (Number.isInteger(n) && n > 0) excluded.add(n);
+    }
+  }
+  const lockFiles = Array.isArray(opts.daemonPidFiles)
+    ? opts.daemonPidFiles
+    : [
+        path.join(__dirname, '.daemon.pid'),
+        path.join(__dirname, '.watch.pid'),
+        process.env.AG_PRISM_PLUGIN_DIR ? path.join(process.env.AG_PRISM_PLUGIN_DIR, '.daemon.pid') : '',
+        path.join(os.homedir(), '.gemini', 'config', 'plugins', 'obsidian-prism', '.daemon.pid'),
+      ];
+  for (const lf of lockFiles) {
+    if (!lf) continue;
+    const pid = readPidFromLockFile(lf);
+    if (pid && pid > 0) excluded.add(pid);
+  }
+  return excluded;
+}
+
+function readAntigravitySessionStartHintMs(opts = {}) {
+  const dataDir =
+    (opts && opts.antigravityDataDir) ||
+    path.join(APP_DATA, 'Antigravity');
+  const candidates = [
+    opts && opts.portFile ? opts.portFile : path.join(dataDir, 'DevToolsActivePort'),
+    path.join(dataDir, 'lockfile'),
+    path.join(dataDir, 'SingletonLock'),
+  ];
+  for (const p of candidates) {
+    try {
+      const st = fs.statSync(p);
+      if (st && st.mtimeMs > 0) return Math.round(st.mtimeMs);
+    } catch {}
+  }
+  return 0;
+}
+
+const WIN_NON_MAIN_TITLES_RE = /^(?:|n\/a|暂缺|olemainthreadwndname|default ime|msctfime ui)$/i;
+
+function isMeaningfulWindowsHostTitle(rawTitle) {
+  const t = String(rawTitle || '').trim();
+  if (!t || WIN_NON_MAIN_TITLES_RE.test(t)) return false;
+  // 中文 CP936 "暂缺" 在 UTF-8 解码下为短替换符串（<=4 字符且全是 U+FFFD 或非可见 ASCII）
+  if (t.length <= 4 && /^[\ufffd\x80-\xff]+$/.test(t)) return false;
+  return true;
+}
+
+function buildWindowsHostCandidatesFromTasklist(csvText, opts = {}) {
+  const rows = parseWindowsTasklistCsv(csvText);
+  if (rows.length === 0) return [];
+  const excluded = collectKnownPrismDaemonPids(opts);
+  const matching = rows.filter(
+    (r) => r.imageName.toLowerCase() === 'antigravity.exe' && !excluded.has(r.pid)
+  );
+  if (matching.length === 0) return [];
+
+  const withTitle = matching.filter((r) => isMeaningfulWindowsHostTitle(r.windowTitle));
+  const selectedRows = withTitle.length > 0 ? withTitle : matching;
+  const exePath = resolveInstalledAntigravityExeWin(opts);
+  const hasActiveCdp = Boolean(opts.hasActiveCdp);
+  const startMsHint = Number(opts.startMsHint) > 0 ? Number(opts.startMsHint) : readAntigravitySessionStartHintMs(opts);
+  const commandLine = hasActiveCdp ? `"${exePath}" ${CDP_OPT_IN_SWITCH}` : `"${exePath}"`;
+
+  return selectedRows.map((r) => ({
+    pid: r.pid,
+    imageName: r.imageName,
+    startMs: startMsHint,
+    exePath,
+    commandLine,
+  }));
+}
 
 // 解析 POSIX `ps -axo pid=,etime=,comm=,args=` 的 BSD/Linux etime（[[dd-]hh:]mm:ss）为毫秒
 function parsePsElapsedMs(etimeStr) {
@@ -1934,19 +2693,25 @@ function detectRunningAntigravityHostSync(opts = {}) {
   if (typeof opts.probeProcesses === 'function') {
     return selectPrimaryHostCandidate(opts.probeProcesses(), nowMs);
   }
+  const effectivePlatform = opts.platformOverride || process.platform;
+  const execSyncFn = typeof opts.execFileSyncFn === 'function' ? opts.execFileSyncFn : execFileSync;
   try {
-    if (IS_WIN) {
-      const out = execFileSync(
-        'powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', WIN_HOST_PROBE_B64],
+    if (effectivePlatform === 'win32') {
+      const out = execSyncFn(
+        'tasklist',
+        ['/FI', 'IMAGENAME eq Antigravity.exe', '/V', '/FO', 'CSV', '/NH'],
         { encoding: 'utf8', windowsHide: true, timeout: 6000, stdio: ['ignore', 'pipe', 'ignore'] }
       );
-      const trimmed = String(out || '').trim();
-      if (!trimmed) return null;
-      const parsed = JSON.parse(trimmed);
-      return selectPrimaryHostCandidate(Array.isArray(parsed) ? parsed : [parsed], nowMs);
+      const preliminary = buildWindowsHostCandidatesFromTasklist(out, { ...opts, hasActiveCdp: false });
+      if (preliminary.length === 0) return null;
+      const activePort = opts.cdpPort !== undefined ? normalizeLoopbackPort(opts.cdpPort) : readPortFromCustomOrDefaultFile(opts.portFile || null);
+      const hasActiveCdp = activePort > 0 ? probeLoopbackCdpVersionSync(activePort, opts) : false;
+      const candidates = hasActiveCdp
+        ? buildWindowsHostCandidatesFromTasklist(out, { ...opts, hasActiveCdp: true })
+        : preliminary;
+      return selectPrimaryHostCandidate(candidates, nowMs);
     }
-    const psOut = execFileSync('ps', ['-axo', 'pid=,etime=,args='], {
+    const psOut = execSyncFn('ps', ['-axo', 'pid=,etime=,args='], {
       encoding: 'utf8',
       timeout: 3000,
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -1962,33 +2727,44 @@ function detectRunningAntigravityHost(opts = {}) {
   if (typeof opts.probeProcesses === 'function') {
     return Promise.resolve(opts.probeProcesses()).then((list) => selectPrimaryHostCandidate(list, nowMs));
   }
+  const effectivePlatform = opts.platformOverride || process.platform;
+  const execFn = typeof opts.execFileFn === 'function' ? opts.execFileFn : execFile;
   return new Promise((resolve) => {
-    if (IS_WIN) {
-      execFile(
-        'powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', WIN_HOST_PROBE_B64],
+    if (effectivePlatform === 'win32') {
+      execFn(
+        'tasklist',
+        ['/FI', 'IMAGENAME eq Antigravity.exe', '/V', '/FO', 'CSV', '/NH'],
         { encoding: 'utf8', windowsHide: true, timeout: 6000, maxBuffer: 1024 * 1024 },
         (err, stdout) => {
           if (err) {
             resolve(null);
             return;
           }
-          try {
-            const trimmed = String(stdout || '').trim();
-            if (!trimmed) {
+          (async () => {
+            try {
+              const preliminary = buildWindowsHostCandidatesFromTasklist(stdout, { ...opts, hasActiveCdp: false });
+              if (preliminary.length === 0) {
+                resolve(null);
+                return;
+              }
+              const activePort =
+                opts.cdpPort !== undefined
+                  ? normalizeLoopbackPort(opts.cdpPort)
+                  : readPortFromCustomOrDefaultFile(opts.portFile || null);
+              const hasActiveCdp = activePort > 0 ? await probeLoopbackCdpVersionAsync(activePort, opts) : false;
+              const candidates = hasActiveCdp
+                ? buildWindowsHostCandidatesFromTasklist(stdout, { ...opts, hasActiveCdp: true })
+                : preliminary;
+              resolve(selectPrimaryHostCandidate(candidates, nowMs));
+            } catch {
               resolve(null);
-              return;
             }
-            const parsed = JSON.parse(trimmed);
-            resolve(selectPrimaryHostCandidate(Array.isArray(parsed) ? parsed : [parsed], nowMs));
-          } catch {
-            resolve(null);
-          }
+          })();
         }
       );
       return;
     }
-    execFile(
+    execFn(
       'ps',
       ['-axo', 'pid=,etime=,args='],
       { encoding: 'utf8', timeout: 3000, maxBuffer: 2 * 1024 * 1024 },
@@ -2116,19 +2892,7 @@ function recordRelaunchPromptState(pluginDir, hostPid, hostStartMs = 0, decision
   return payload;
 }
 
-const WIN_MESSAGEBOX_PS = [
-  '$ErrorActionPreference = "SilentlyContinue"',
-  'Add-Type -AssemblyName System.Windows.Forms',
-  '$res = [System.Windows.Forms.MessageBox]::Show(',
-  '  [string]$env:AG_PRISM_DLG_BODY,',
-  '  [string]$env:AG_PRISM_DLG_TITLE,',
-  '  [System.Windows.Forms.MessageBoxButtons]::YesNo,',
-  '  [System.Windows.Forms.MessageBoxIcon]::Information',
-  ')',
-  'Write-Output ([string]$res)',
-].join('\n');
-
-const WIN_MESSAGEBOX_B64 = Buffer.from(WIN_MESSAGEBOX_PS, 'utf16le').toString('base64');
+// Windows 桌面弹窗交由原生 C# 图形安装器/Watcher 处理，Node 侧不再派生 PowerShell MessageBox
 
 const MAC_DIALOG_APPLESCRIPT = [
   'on run argv',
@@ -2257,27 +3021,26 @@ function promptUserForHostRelaunch(opts = {}) {
   const env = opts.env || process.env;
   return new Promise((resolve) => {
     if (effectivePlatform === 'win32') {
-      execFn(
-        'powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', WIN_MESSAGEBOX_B64],
-        {
-          encoding: 'utf8',
-          windowsHide: true,
-          timeout: 120000,
-          env: {
-            ...env,
-            AG_PRISM_DLG_TITLE: copy.title,
-            AG_PRISM_DLG_BODY: copy.body,
-          },
-        },
-        (err, stdout) => {
-          if (err) {
-            resolve(false);
-            return;
-          }
-          resolve(String(stdout || '').trim().toLowerCase() === 'yes');
+      // Windows 图形弹窗统一交由原生 C# 安装器/Watcher 处理，Node 侧仅输出清晰 CLI 提示并返回 false（零 PowerShell 弹窗）
+      const notice = {
+        title: copy.title,
+        body: copy.body,
+        actionRequired: true,
+        handledBy: 'cli-notice',
+      };
+      if (typeof opts.onCliNotice === 'function') {
+        try {
+          opts.onCliNotice(notice);
+        } catch {}
+      } else if (!opts.silent) {
+        const stream = opts.outputStream || process.stderr;
+        if (stream && typeof stream.write === 'function') {
+          try {
+            stream.write(`\n[${copy.title}] ${copy.body}\n`);
+          } catch {}
         }
-      );
+      }
+      resolve(false);
       return;
     }
     if (effectivePlatform === 'darwin') {
@@ -2398,60 +3161,379 @@ async function executeHostRelaunchSequence(task, hooks = {}) {
   return { relaunched: true, exePath, args: [CDP_OPT_IN_SWITCH] };
 }
 
-const WIN_DETACHED_RELAUNCH_PS = [
-  '$ErrorActionPreference = "SilentlyContinue"',
-  '$taskFile = [string]$env:AG_PRISM_RELAUNCH_TASK_FILE',
-  'if (-not $taskFile -or -not (Test-Path -LiteralPath $taskFile -PathType Leaf)) { exit 0 }',
-  '$task = Get-Content -LiteralPath $taskFile -Raw -Encoding UTF8 | ConvertFrom-Json',
-  'Remove-Item -LiteralPath $taskFile -Force -ErrorAction SilentlyContinue',
-  '$targetPid = [int]$task.hostPid',
-  '$exePath = [string]$task.exePath',
-  'if (-not $exePath) {',
-  '  $exePath = Join-Path $env:LOCALAPPDATA "Programs\\antigravity\\Antigravity.exe"',
-  '}',
-  'if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) { exit 0 }',
-  'function Test-MainHostAlive {',
-  '  $ps = @(Get-Process -Name "Antigravity" -ErrorAction SilentlyContinue)',
-  '  if ($ps.Count -eq 0) { return $false }',
-  '  foreach ($p in $ps) {',
-  '    if ($p.Id -eq $targetPid) { return $true }',
-  '    $cl = [string](Get-CimInstance Win32_Process -Filter ("ProcessId = " + $p.Id) -ErrorAction SilentlyContinue).CommandLine',
-  '    if ($cl -and ($cl -notmatch "--type=") -and ($cl -notmatch "sidecar_sdk") -and ($cl -notmatch "register_loader\\.js")) {',
-  '      return $true',
-  '    }',
-  '  }',
-  '  return $false',
-  '}',
-  'foreach ($p in @(Get-Process -Name "Antigravity" -ErrorAction SilentlyContinue)) {',
-  '  if ($p.MainWindowHandle -ne 0) { $null = $p.CloseMainWindow() }',
-  '}',
-  '$exited = $false',
-  'for ($i = 0; $i -lt 100; $i++) {',
-  '  if (-not (Test-MainHostAlive)) { $exited = $true; break }',
-  '  if ($i -eq 12) {',
-  '    foreach ($p in @(Get-Process -Name "Antigravity" -ErrorAction SilentlyContinue)) {',
-  '      if ($p.MainWindowHandle -ne 0) { $null = $p.CloseMainWindow() }',
-  '    }',
-  '  }',
-  '  Start-Sleep -Milliseconds 250',
-  '}',
-  'if (-not $exited) { exit 0 }',
-  'Start-Sleep -Milliseconds 350',
-  '$workDir = Split-Path -Parent $exePath',
-  'Start-Process -FilePath $exePath -ArgumentList "--remote-debugging-port=0" -WorkingDirectory $workDir | Out-Null',
-].join('\n');
+// 纯 Node Windows 脱离重启引擎：优雅处理 app_storage.json runInBackground 托盘陷阱 + loopback CDP Browser.close + 零 PowerShell/WMI
+const APP_STORAGE_MAX_BYTES = 8 * 1024 * 1024;
+const APP_STORAGE_RESTORE_RETRIES = 3;
+const APP_STORAGE_RESTORE_RETRY_DELAY_MS = 50;
+const RELAUNCH_TASK_MAX_BYTES = 1024 * 1024;
 
-const WIN_DETACHED_RELAUNCH_B64 = Buffer.from(WIN_DETACHED_RELAUNCH_PS, 'utf16le').toString('base64');
+function getAntigravityAppStoragePath(opts = {}) {
+  if (opts && typeof opts.appStoragePath === 'string' && opts.appStoragePath.trim()) {
+    return path.resolve(opts.appStoragePath.trim());
+  }
+  const baseAppData =
+    (opts && opts.appDataDir) ||
+    (opts && opts.env && opts.env.APPDATA) ||
+    APP_DATA;
+  return path.join(baseAppData, 'Antigravity', 'app_storage.json');
+}
 
-const WIN_WMI_BREAKAWAY_PS = [
-  '$ErrorActionPreference = "Stop"',
-  '$cmd = "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand " + $env:AG_PRISM_HELPER_B64',
-  '$psi = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }',
-  '$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd; ProcessStartupInformation = $psi }',
-  'if ($r -and $r.ReturnValue -eq 0 -and $r.ProcessId) { Write-Output $r.ProcessId }',
-].join('\n');
+function suspendAntigravityRunInBackground(appStoragePath, opts = {}) {
+  const targetPath = getAntigravityAppStoragePath({ appStoragePath });
+  if (!fs.existsSync(targetPath)) {
+    return { modified: false, originalValue: undefined, path: targetPath, skippedReason: 'not-found' };
+  }
+  let resolved;
+  try {
+    ({ resolved } = assertSafeRegularFileSync(targetPath, APP_STORAGE_MAX_BYTES));
+  } catch (err) {
+    return {
+      modified: false,
+      originalValue: undefined,
+      path: targetPath,
+      skippedReason: String(err && err.message ? err.message : err),
+    };
+  }
+  try {
+    const raw = fs.readFileSync(resolved, 'utf8').replace(/^\uFEFF/, '');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { modified: false, originalValue: undefined, path: resolved, skippedReason: 'invalid-json-object' };
+    }
+    const cur = parsed.runInBackground;
+    if (cur !== 'true' && cur !== true) {
+      return { modified: false, originalValue: cur, path: resolved };
+    }
+    const nextVal = typeof cur === 'boolean' ? false : 'false';
+    parsed.runInBackground = nextVal;
+    const writeFn =
+      typeof opts.writeFileSync === 'function'
+        ? opts.writeFileSync
+        : (p, data) => writeFileAtomicallyNoSymlinkSync(p, data, { maxBytes: APP_STORAGE_MAX_BYTES });
+    writeFn(resolved, JSON.stringify(parsed, null, 2) + '\n');
+    return { modified: true, originalValue: cur, path: resolved };
+  } catch (err) {
+    return {
+      modified: false,
+      originalValue: undefined,
+      path: resolved,
+      skippedReason: String(err && err.message ? err.message : err),
+    };
+  }
+}
 
-const WIN_WMI_BREAKAWAY_B64 = Buffer.from(WIN_WMI_BREAKAWAY_PS, 'utf16le').toString('base64');
+async function restoreAntigravityRunInBackground(appStoragePath, suspendState, opts = {}) {
+  if (!suspendState || !suspendState.modified) {
+    return { restored: false, skipped: true, attempts: 0 };
+  }
+  const targetPath = suspendState.path || getAntigravityAppStoragePath({ appStoragePath });
+  const retries =
+    Number.isInteger(opts.retries) && opts.retries > 0 ? opts.retries : APP_STORAGE_RESTORE_RETRIES;
+  const retryDelayMs =
+    Number.isFinite(Number(opts.retryDelayMs)) && Number(opts.retryDelayMs) >= 0
+      ? Number(opts.retryDelayMs)
+      : APP_STORAGE_RESTORE_RETRY_DELAY_MS;
+  const sleepFn =
+    typeof opts.sleep === 'function' ? opts.sleep : (ms) => new Promise((r) => setTimeout(r, ms));
+  const readFn = typeof opts.readFileSync === 'function' ? opts.readFileSync : (p) => fs.readFileSync(p, 'utf8');
+  const writeFn =
+    typeof opts.writeFileSync === 'function'
+      ? opts.writeFileSync
+      : (p, data) => writeFileAtomicallyNoSymlinkSync(p, data, { maxBytes: APP_STORAGE_MAX_BYTES });
+
+  let lastErr = null;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const { resolved } = assertSafeRegularFileSync(targetPath, APP_STORAGE_MAX_BYTES);
+      const latestRaw = String(readFn(resolved) || '').replace(/^\uFEFF/, '');
+      const latestObj = JSON.parse(latestRaw);
+      if (!latestObj || typeof latestObj !== 'object' || Array.isArray(latestObj)) {
+        throw new Error('Invalid app_storage.json root object');
+      }
+      latestObj.runInBackground = suspendState.originalValue;
+      writeFn(resolved, JSON.stringify(latestObj, null, 2) + '\n');
+      return {
+        restored: true,
+        attempts: attempt,
+        path: resolved,
+        restoredValue: suspendState.originalValue,
+      };
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries && retryDelayMs > 0) {
+        await sleepFn(retryDelayMs);
+      }
+    }
+  }
+  return {
+    restored: false,
+    attempts: retries,
+    path: targetPath,
+    error: String(lastErr && lastErr.message ? lastErr.message : lastErr),
+  };
+}
+
+function isAntigravityCdpCloseTarget(target) {
+  if (!target || !target.webSocketDebuggerUrl) return false;
+  const url = String(target.url || '').trim();
+  const title = String(target.title || '').trim();
+  if (!url) return false;
+  if (isSwarmSidecarUrl(url)) return true;
+  if (target.type !== 'page') return false;
+  if (/\bvisual studio code\b/i.test(title) && !/\bantigravity\b/i.test(title)) {
+    return false;
+  }
+  return isEligibleTarget(target);
+}
+
+// 通过本机回环 CDP 发送 Browser.close（严格双重校验 /json/version 与 /json/list 属于 Antigravity；严禁调用 timer.unref 避免 Node 22 早退）
+async function requestLoopbackCdpBrowserClose(cdpPort, opts = {}) {
+  const port = normalizeLoopbackPort(cdpPort);
+  if (!port) return false;
+  const fetchImpl = typeof opts.fetchImpl === 'function' ? opts.fetchImpl : globalThis.fetch;
+  const WsCtor = typeof opts.WebSocketCtor === 'function' ? opts.WebSocketCtor : globalThis.WebSocket;
+  if (typeof fetchImpl !== 'function' || typeof WsCtor !== 'function') return false;
+  const timeoutMs = Math.max(200, Math.min(8000, Number(opts.timeoutMs) || 2500));
+
+  const fetchJsonLoopback = async (endpointPath) => {
+    const controller = new AbortController();
+    const fetchTimer = setTimeout(() => controller.abort(), Math.min(1500, timeoutMs));
+    try {
+      const res = await fetchImpl(`http://127.0.0.1:${port}${endpointPath}`, { signal: controller.signal });
+      if (!res || !res.ok) return null;
+      return await res.json();
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(fetchTimer);
+    }
+  };
+
+  const versionInfo = await fetchJsonLoopback('/json/version');
+  if (!isAntigravityCdpVersionInfo(versionInfo, port)) {
+    return false;
+  }
+  const targets = await fetchJsonLoopback('/json/list');
+  if (!Array.isArray(targets) || !targets.some(isAntigravityCdpCloseTarget)) {
+    return false;
+  }
+
+  const wsUrl = String(versionInfo.webSocketDebuggerUrl).trim();
+  return new Promise((resolve) => {
+    let settled = false;
+    let sent = false;
+    let ws = null;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        if (ws && typeof ws.close === 'function') ws.close();
+      } catch {}
+      resolve(Boolean(ok));
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    try {
+      ws = new WsCtor(wsUrl);
+    } catch {
+      finish(false);
+      return;
+    }
+    const onOpen = () => {
+      try {
+        ws.send(JSON.stringify({ id: 1, method: 'Browser.close' }));
+        sent = true;
+      } catch {
+        finish(false);
+      }
+    };
+    const onMessage = (evt) => {
+      try {
+        const raw = typeof evt === 'string' ? evt : evt && evt.data;
+        const msg = JSON.parse(String(raw || ''));
+        if (msg && msg.id === 1) {
+          finish(!msg.error);
+        }
+      } catch {}
+    };
+    const onClose = () => finish(sent);
+    const onError = () => finish(false);
+    if (typeof ws.addEventListener === 'function') {
+      ws.addEventListener('open', onOpen, { once: true });
+      ws.addEventListener('message', onMessage);
+      ws.addEventListener('close', onClose, { once: true });
+      ws.addEventListener('error', onError, { once: true });
+    } else if (typeof ws.on === 'function') {
+      ws.once('open', onOpen);
+      ws.on('message', onMessage);
+      ws.once('close', onClose);
+      ws.once('error', onError);
+    } else {
+      finish(false);
+    }
+  });
+}
+
+function isWindowsAntigravityHostAliveSync(hostPid, opts = {}) {
+  const pid = Number(hostPid);
+  const excluded = collectKnownPrismDaemonPids(opts);
+  if (Number.isInteger(pid) && pid > 0 && !excluded.has(pid)) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      if (err && err.code === 'EPERM') return true;
+    }
+  }
+  const targetExe = String((opts && opts.exePath) || '').trim();
+  if (targetExe && !isAntigravityShortcutTarget(targetExe)) {
+    return false;
+  }
+  const execSyncFn = typeof opts.execFileSyncFn === 'function' ? opts.execFileSyncFn : execFileSync;
+  try {
+    const out = execSyncFn(
+      'tasklist',
+      ['/FI', 'IMAGENAME eq Antigravity.exe', '/FO', 'CSV', '/NH'],
+      { encoding: 'utf8', windowsHide: true, timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] }
+    );
+    const rows = parseWindowsTasklistCsv(out);
+    return rows.some((r) => r.imageName.toLowerCase() === 'antigravity.exe' && !excluded.has(r.pid));
+  } catch {
+    return false;
+  }
+}
+
+async function runWindowsDetachedRelaunchTask(task = {}, hooks = {}) {
+  const hostPid = Number(task && task.hostPid) || 0;
+  const exePath = String((task && task.exePath) || '').trim() || resolveInstalledAntigravityExeWin();
+  const launchArgs =
+    Array.isArray(task && task.args) && task.args.length > 0
+      ? task.args.map((a) => String(a))
+      : [CDP_OPT_IN_SWITCH];
+  const maxWaitMs = Math.max(200, Math.min(180000, Number(task && task.maxWaitMs) || 25000));
+  const pollMs = Math.max(20, Math.min(2000, Number(task && task.pollMs) || 250));
+  const settleMs = Math.max(0, Math.min(10000, Number((task && task.settleMs) ?? 350)));
+  const appStoragePath = getAntigravityAppStoragePath({
+    appStoragePath: task && task.appStoragePath,
+  });
+  const cdpPort =
+    normalizeLoopbackPort(task && task.cdpPort) ||
+    normalizeLoopbackPort(readPortFromCustomOrDefaultFile((task && task.portFile) || null));
+
+  const sleepFn = typeof hooks.sleep === 'function' ? hooks.sleep : (ms) => new Promise((r) => setTimeout(r, ms));
+  const suspendFn =
+    typeof hooks.suspendRunInBackground === 'function'
+      ? hooks.suspendRunInBackground
+      : (p) => suspendAntigravityRunInBackground(p);
+  const restoreFn =
+    typeof hooks.restoreRunInBackground === 'function'
+      ? hooks.restoreRunInBackground
+      : (p, st) => restoreAntigravityRunInBackground(p, st, hooks.restoreOpts || {});
+  const requestCdpCloseFn =
+    typeof hooks.requestCdpClose === 'function'
+      ? hooks.requestCdpClose
+      : (p) => requestLoopbackCdpBrowserClose(p, hooks.cdpCloseOpts || {});
+  const isHostStillRunningFn =
+    typeof hooks.isHostStillRunning === 'function'
+      ? hooks.isHostStillRunning
+      : () => isWindowsAntigravityHostAliveSync(hostPid, { excludePids: task && task.excludePids, exePath });
+  const spawnFn = typeof hooks.spawnFn === 'function' ? hooks.spawnFn : spawn;
+  const existsFn = typeof hooks.existsSync === 'function' ? hooks.existsSync : fs.existsSync;
+
+  if (!hooks.launchHost && !hooks.spawnFn && (!exePath || !existsFn(exePath))) {
+    return { relaunched: false, reason: 'missing-exe', exePath };
+  }
+
+  let suspendState = null;
+  let restoreRes = null;
+  let cdpClosed = false;
+  let exited = false;
+
+  try {
+    suspendState = suspendFn(appStoragePath);
+    if (cdpPort > 0) {
+      try {
+        cdpClosed = Boolean(await requestCdpCloseFn(cdpPort));
+      } catch {
+        cdpClosed = false;
+      }
+    }
+    const deadline = Date.now() + maxWaitMs;
+    while (Date.now() <= deadline) {
+      const alive = await isHostStillRunningFn(hostPid, exePath);
+      if (!alive) {
+        exited = true;
+        break;
+      }
+      await sleepFn(pollMs);
+    }
+  } finally {
+    if (suspendState && suspendState.modified) {
+      restoreRes = await restoreFn(appStoragePath, suspendState);
+    }
+  }
+
+  if (!exited) {
+    return {
+      relaunched: false,
+      reason: 'host-did-not-exit',
+      exePath,
+      cdpClosed,
+      suspendState,
+      restoreRes,
+    };
+  }
+
+  if (settleMs > 0) {
+    await sleepFn(settleMs);
+  }
+
+  if (typeof hooks.launchHost === 'function') {
+    const ok = await hooks.launchHost(exePath, launchArgs);
+    return {
+      relaunched: Boolean(ok !== false),
+      exePath,
+      args: launchArgs,
+      cdpClosed,
+      suspendState,
+      restoreRes,
+    };
+  }
+
+  const cleanEnv = { ...(hooks.env || process.env) };
+  delete cleanEnv.ELECTRON_RUN_AS_NODE;
+  try {
+    const child = spawnFn(exePath, launchArgs, {
+      cwd: path.dirname(exePath),
+      detached: true,
+      windowsHide: false,
+      stdio: 'ignore',
+      env: cleanEnv,
+    });
+    if (child && typeof child.on === 'function') child.on('error', () => {});
+    if (child && typeof child.unref === 'function') child.unref();
+    return {
+      relaunched: Boolean(child),
+      pid: (child && child.pid) || null,
+      exePath,
+      args: launchArgs,
+      cdpClosed,
+      suspendState,
+      restoreRes,
+    };
+  } catch (err) {
+    return {
+      relaunched: false,
+      reason: 'launch-failed',
+      error: String(err && err.message ? err.message : err),
+      exePath,
+      args: launchArgs,
+      cdpClosed,
+      suspendState,
+      restoreRes,
+    };
+  }
+}
 
 function normalizeMacAppBundlePath(rawPath) {
   const s = String(rawPath || '').trim();
@@ -2488,7 +3570,7 @@ const MAC_DETACHED_RELAUNCH_SH = [
   'open -na "$app_path" --args --remote-debugging-port=0 >/dev/null 2>&1 &',
 ].join('\n');
 
-// 纯 POSIX sh 脱离重启脚本（所有动态参数经位置参数 "$1" "$2" 传入，零拼接、零 SIGKILL、零 app.asar 修改）
+// 纯 POSIX sh 脱离重启脚本（所有动态参数经位置参数 "$1" "$2" 传入，零拼接、零强制终止、零宿主归档修改）
 const LINUX_DETACHED_RELAUNCH_SH = [
   'target_pid="$1"',
   'exe_path="$2"',
@@ -2564,52 +3646,70 @@ function spawnDetachedHostRelaunchHelper(task, opts = {}) {
   const effectivePlatform = opts.platformOverride || process.platform;
   const spawnFn = typeof opts.spawnFn === 'function' ? opts.spawnFn : spawn;
   if (effectivePlatform === 'win32') {
-    const privateStateDir = path.join(os.homedir(), '.gemini', 'config', 'plugins', 'obsidian-prism');
-    fs.mkdirSync(privateStateDir, { recursive: true });
-    const privateTaskFile = path.join(privateStateDir, '.relaunch-task.json');
-    const resolvedExe =
-      task.exePath ||
-      path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Programs', 'antigravity', 'Antigravity.exe');
-    const tmpTaskFile = `${privateTaskFile}.${process.pid}.tmp`;
-    fs.writeFileSync(
-      tmpTaskFile,
-      JSON.stringify({ hostPid, exePath: resolvedExe }, null, 2) + '\n',
-      { encoding: 'utf8', mode: 0o600 }
-    );
-    fs.renameSync(tmpTaskFile, privateTaskFile);
-    if (!opts.disableWmiBreakaway) {
-      try {
-        const wmiRunnerPs = `$env:AG_PRISM_RELAUNCH_TASK_FILE = [System.IO.Path]::Combine($env:USERPROFILE, '.gemini', 'config', 'plugins', 'obsidian-prism', '.relaunch-task.json'); powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ${WIN_DETACHED_RELAUNCH_B64}`;
-        const wmiRunnerB64 = Buffer.from(wmiRunnerPs, 'utf16le').toString('base64');
-        const out = execFileSync(
-          'powershell.exe',
-          ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', WIN_WMI_BREAKAWAY_B64],
-          {
-            encoding: 'utf8',
-            windowsHide: true,
-            timeout: 6000,
-            stdio: ['ignore', 'pipe', 'ignore'],
-            env: { ...process.env, AG_PRISM_HELPER_B64: wmiRunnerB64 },
-          }
-        );
-        const helperPid = parseInt(String(out || '').trim().split(/\s+/).pop(), 10);
-        if (Number.isInteger(helperPid) && helperPid > 0) {
-          return { spawned: true, pid: helperPid, method: 'wmi-breakaway' };
-        }
-      } catch {}
+    const privateStateDir = opts.stateDir
+      ? path.resolve(opts.stateDir)
+      : path.join(os.homedir(), '.gemini', 'config', 'plugins', 'obsidian-prism');
+    if (isSymlinkPathSync(privateStateDir)) {
+      return { spawned: false, reason: 'symlink-state-dir' };
     }
-    const child = spawnFn(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', WIN_DETACHED_RELAUNCH_B64],
-      {
+    fs.mkdirSync(privateStateDir, { recursive: true });
+    const privateTaskFile = path.join(
+      privateStateDir,
+      `.relaunch-task-${crypto.randomBytes(6).toString('hex')}.json`
+    );
+    const resolvedExe =
+      String((task && task.exePath) || '').trim() ||
+      resolveInstalledAntigravityExeWin(opts);
+    const taskPayload = {
+      schema: 1,
+      hostPid,
+      exePath: resolvedExe,
+      args: Array.isArray(task.args) && task.args.length > 0 ? task.args : [CDP_OPT_IN_SWITCH],
+      cdpPort: normalizeLoopbackPort(task.cdpPort) || normalizeLoopbackPort(readPortFromCustomOrDefaultFile(task.portFile || null)),
+      appStoragePath: task.appStoragePath ? path.resolve(String(task.appStoragePath)) : getAntigravityAppStoragePath(opts),
+      maxWaitMs: Number(task.maxWaitMs) || 25000,
+      pollMs: Number(task.pollMs) || 250,
+      settleMs: task.settleMs !== undefined ? Number(task.settleMs) : 350,
+    };
+    writeFileAtomicallyNoSymlinkSync(privateTaskFile, JSON.stringify(taskPayload, null, 2) + '\n', {
+      maxBytes: RELAUNCH_TASK_MAX_BYTES,
+      mode: 0o600,
+    });
+
+    const runtime = resolveWindowsDetachedNodeRuntime(opts);
+    const helperPath = path.resolve(opts.helperPath || __filename);
+    const cleanEnv = { ...(opts.env || process.env) };
+    if (runtime.useElectronAsNode) {
+      cleanEnv.ELECTRON_RUN_AS_NODE = '1';
+    } else {
+      delete cleanEnv.ELECTRON_RUN_AS_NODE;
+    }
+
+    try {
+      const child = spawnFn(runtime.execPath, [helperPath, '--run-relaunch-task', privateTaskFile], {
+        cwd: path.dirname(helperPath),
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
-        env: { ...process.env, AG_PRISM_RELAUNCH_TASK_FILE: privateTaskFile },
-      }
-    );
-    if (child && typeof child.unref === 'function') child.unref();
-    return { spawned: true, pid: (child && child.pid) || null, method: 'detached-spawn' };
+        env: cleanEnv,
+      });
+      if (child && typeof child.on === 'function') child.on('error', () => {});
+      if (child && typeof child.unref === 'function') child.unref();
+      return {
+        spawned: Boolean(child),
+        pid: (child && child.pid) || null,
+        method: 'node-detached-helper',
+        taskFile: privateTaskFile,
+        useElectronAsNode: runtime.useElectronAsNode,
+      };
+    } catch (err) {
+      try { fs.unlinkSync(privateTaskFile); } catch {}
+      return {
+        spawned: false,
+        reason: 'spawn-failed',
+        error: String(err && err.message ? err.message : err),
+      };
+    }
   }
 
   if (effectivePlatform === 'darwin') {
@@ -7098,8 +8198,9 @@ function getInjectWrapperTemplate() {
       cleanOld();
       let st = D.getElementById(SID);
       if (!st) { st = D.createElement('style'); st.id = SID; }
-      const fk = __AG_INJ_CSSHASH__;
-      if (st.getAttribute?.('data-ag-cs-flat') !== fk + ':' + (st.textContent || '').length) {
+      const fk = __AG_INJ_CSSHASH__, flatOk = st.getAttribute?.('data-ag-cs-flat') === fk + ':' + (st.textContent || '').length;
+      const rawOk = st.getAttribute?.('data-ag-cs-css-hash') === fk && (st.textContent || '').length > 0 && typeof CSS !== 'undefined' && CSS.supports?.('selector(&)');
+      if (!flatOk && !rawOk) {
         const c = getCss();
         if (st.textContent !== c) st.textContent = c;
         st.removeAttribute?.('data-ag-cs-flat');
@@ -10380,6 +11481,16 @@ function buildSettingsChannelExpression(config = null, opts = null) {
       try { (window.__agPrism || window.__agClaudeStyle)?.sync?.(); } catch {}
       return { ok: true, reused: true, codeHash: targetHash };
     }
+    try {
+      const staleSec = document.getElementById?.('ag-cs-settings-sec');
+      if (staleSec) {
+        try { staleSec.querySelector?.('[data-testid="prism-wallpaper-slot"]')?.__agPrismWpUiHandle?.destroy?.(); } catch {}
+        try { staleSec.querySelector?.('[data-testid="prism-suggester-slot"]')?.__agPrismSgUiHandle?.destroy?.(); } catch {}
+        try { staleSec.__agMascotStageApi?.dispose?.(); } catch {}
+        try { staleSec.__prismThoughtUiHandle = null; } catch {}
+        staleSec.remove?.();
+      }
+    } catch {}
     ${minRuntime};
     try {
       const panel = globalThis.__agPrismSettingsPanel || window.__agPrismSettingsPanel;
@@ -10395,7 +11506,7 @@ function buildSettingsChannelExpression(config = null, opts = null) {
     } catch {}
     try { (window.__agPrism || window.__agClaudeStyle)?.sync?.(); } catch {}
     try { document.getElementById('ag-cs-settings-sec')?.__prismMountThoughtUi?.(); } catch {}
-    try { window.__prismMountWallpaperUi?.(); } catch {}
+    try { document.getElementById('ag-cs-settings-sec')?.__prismMountWp?.(); } catch {}
     try { (document.getElementById('ag-cs-settings-sec') || document.getElementById('ag-prism-settings-sec'))?.__prismMountSg?.(); } catch {}
     return { ok: true, codeHash: targetHash };
   })()`;
@@ -11197,6 +12308,8 @@ const REMOVE_EXPRESSION = `(() => {
       'data-ag-cs-code-font',
       'data-ag-cs-ligatures',
       'data-ag-cs-ambient',
+      'data-ag-cs-dark-aura',
+      'data-ag-cs-dark-aura-style',
       'data-ag-prism-thought-view',
       'data-ag-prism-omni',
       'data-ag-prism-link-target',
@@ -11427,10 +12540,32 @@ module.exports = {
   isSwarmSidecarUrl,
   redactSensitiveUrl,
   readPidFromLockFile,
+  parseWindowsTasklistCsv,
   inspectProcessSync,
   matchesExpectedDaemonSignature,
   isExpectedDaemonProcess,
   CDP_OPT_IN_SWITCH,
+  LNK_MAX_FILE_BYTES,
+  APP_STORAGE_MAX_BYTES,
+  assertSafeRegularFileSync,
+  parseWindowsLnkBuffer,
+  updateWindowsLnkArguments,
+  readWindowsLnkFileSync,
+  writeWindowsLnkArgumentsSync,
+  getDefaultWindowsShortcutDirs,
+  collectWindowsLnkFilesSync,
+  runWindowsShortcutAdapter,
+  runWindowsShortcutAdapterAsync,
+  resolveWindowsDetachedNodeRuntime,
+  probeLoopbackCdpVersionAsync,
+  probeLoopbackCdpVersionSync,
+  buildWindowsHostCandidatesFromTasklist,
+  getAntigravityAppStoragePath,
+  suspendAntigravityRunInBackground,
+  restoreAntigravityRunInBackground,
+  requestLoopbackCdpBrowserClose,
+  isWindowsAntigravityHostAliveSync,
+  runWindowsDetachedRelaunchTask,
   IS_LINUX,
   LINUX_DESKTOP_SHADOW_MARKER,
   LINUX_GOMEMLIMIT_LINE_RE,
@@ -11536,3 +12671,20 @@ module.exports = {
   HOME_STUDIO_REMOVE_EXPRESSION,
   isSafeV2SidebarClientSource,
 };
+
+if (require.main === module) {
+  const flagIdx = process.argv.indexOf('--run-relaunch-task');
+  if (flagIdx >= 0 && process.argv[flagIdx + 1]) {
+    const taskFilePath = path.resolve(String(process.argv[flagIdx + 1]));
+    (async () => {
+      try {
+        const { resolved } = assertSafeRegularFileSync(taskFilePath, RELAUNCH_TASK_MAX_BYTES);
+        const raw = fs.readFileSync(resolved, 'utf8').replace(/^\uFEFF/, '');
+        try { fs.unlinkSync(resolved); } catch {}
+        const task = JSON.parse(raw);
+        if (!task || typeof task !== 'object' || Array.isArray(task)) return;
+        await runWindowsDetachedRelaunchTask(task);
+      } catch {}
+    })();
+  }
+}

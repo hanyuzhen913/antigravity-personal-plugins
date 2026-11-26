@@ -1,9 +1,9 @@
 # Obsidian Prism 个人定制补丁与上游更新指南
 
 - **上游仓库**：<https://github.com/RMvdesi/obsidian-prism>
-- **基线版本 / Commit**：`v1.0.8-beta.2`（`2e27680`）
+- **基线版本 / Commit**：`v1.0.8-beta.3`（`41cc481`）
 - **导出日期**：`2026-11-26`
-- **定制分支**：本地源码仓库 `my-custom`（commit `02243b1`）
+- **定制分支**：本地源码仓库 `my-custom`（commit `9ef06de`）
 - **补丁文件**：[`obsidian-prism.patch`](./obsidian-prism.patch)
 
 ## 包含的自定义修改文件（共 11 个）

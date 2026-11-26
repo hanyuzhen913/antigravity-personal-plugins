@@ -6,6 +6,7 @@
   }
 })(typeof globalThis !== 'undefined' ? globalThis : window, function () {
   'use strict';
+  const M = Math;
 
   const PROXIMITY_RADIUS_PX = 105;
 
@@ -16,7 +17,7 @@
   const WAKE_DURATION_SEC = 0.7;
 
   function clamp(v, lo, hi) {
-    return Math.min(hi, Math.max(lo, v));
+    return M.min(hi, M.max(lo, v));
   }
 
   function resolveCrystalAccentCode(raw) {
@@ -46,16 +47,16 @@
     if (!Number.isFinite(localX) || !Number.isFinite(localY) || localX < -2000 || localY < -2000) {
       return 0;
     }
-    const w = Math.max(2, Number(width) || 0);
-    const h = Math.max(2, Number(height) || 0);
-    const r = Math.max(1, Number(radius) || PROXIMITY_RADIUS_PX);
-    const capR = Math.min(w, h) * 0.5;
+    const w = M.max(2, Number(width) || 0);
+    const h = M.max(2, Number(height) || 0);
+    const r = M.max(1, Number(radius) || PROXIMITY_RADIUS_PX);
+    const capR = M.min(w, h) * 0.5;
     const cx = localX - w * 0.5;
     const cy = localY - h * 0.5;
-    const halfInnerW = Math.max(0, w * 0.5 - capR);
-    const dx = Math.max(0, Math.abs(cx) - halfInnerW);
-    const dy = Math.abs(cy);
-    const dist = Math.hypot(dx, dy) - capR;
+    const halfInnerW = M.max(0, w * 0.5 - capR);
+    const dx = M.max(0, M.abs(cx) - halfInnerW);
+    const dy = M.abs(cy);
+    const dist = M.hypot(dx, dy) - capR;
 
     if (dist <= 0) return 1;
     if (dist >= r) return 0;
@@ -76,13 +77,13 @@
     { u: 0.83, v: 0.62, freq: 0.3141593, phase: 4.86, wobFreq: 0.0618, wobAmp: 0.58, wobPhase: 5.6, scale: 0.88 },
   ];
   const REDUCED_GLINT_INTENSITY = [0, 0.42, 0.24, 0];
-  const TWO_PI = Math.PI * 2;
+  const TWO_PI = M.PI * 2;
 
   // 单路星芒强度（纯函数、零分配）
   function glintIntensityAt(a, t) {
-    const wob = a.wobAmp * Math.sin(t * TWO_PI * a.wobFreq + a.wobPhase);
-    const wave = Math.sin(t * TWO_PI * a.freq + a.phase + wob);
-    return wave > 0 ? Math.pow(wave, 16) : 0;
+    const wob = a.wobAmp * M.sin(t * TWO_PI * a.wobFreq + a.wobPhase);
+    const wave = M.sin(t * TWO_PI * a.freq + a.phase + wob);
+    return wave > 0 ? M.pow(wave, 16) : 0;
   }
 
   /**
@@ -93,7 +94,7 @@
       for (let i = 0; i < 4; i++) out[i] = REDUCED_GLINT_INTENSITY[i];
       return out;
     }
-    const t = Math.max(0, Number(timeSec) || 0);
+    const t = M.max(0, Number(timeSec) || 0);
     for (let i = 0; i < 4; i++) out[i] = glintIntensityAt(GLINT_ANCHORS[i], t);
     return out;
   }
@@ -103,7 +104,7 @@
    * 对外导出版本每次返回全新数组（语义安全，便于测试 deepEqual 比较）；渲染循环使用 fillGlintIntensities。
    */
   function evaluateDeterministicGlints(timeSec, reduceMotion = false) {
-    const t = Math.max(0, Number(timeSec) || 0);
+    const t = M.max(0, Number(timeSec) || 0);
     return GLINT_ANCHORS.map((a, idx) => ({
       u: a.u,
       v: a.v,
@@ -493,7 +494,7 @@ void main() {
     const drawLockPath = (ox, oy) => {
       ctx.beginPath();
       // 锁环拱门
-      ctx.arc(cx + ox, cy - 1.5 + oy, 2.25, Math.PI, 0, false);
+      ctx.arc(cx + ox, cy - 1.5 + oy, 2.25, M.PI, 0, false);
       ctx.lineTo(cx + 2.25 + ox, cy + 0.2 + oy);
       ctx.moveTo(cx - 2.25 + ox, cy - 1.5 + oy);
       ctx.lineTo(cx - 2.25 + ox, cy + 0.2 + oy);
@@ -502,7 +503,7 @@ void main() {
       ctx.stroke();
       // 微缩锁芯刻痕
       ctx.beginPath();
-      ctx.arc(cx + ox, cy + 2.55 + oy, 0.75, 0, Math.PI * 2);
+      ctx.arc(cx + ox, cy + 2.55 + oy, 0.75, 0, M.PI * 2);
       ctx.fill();
     };
 
@@ -551,10 +552,10 @@ void main() {
     ctx.fillRect(0, 0, cssW, cssH);
 
     // 确定性斜切长切面：每列一条斜分割线，约 10~12 块
-    const cols = Math.max(4, Math.round(cssW / 52));
+    const cols = M.max(4, M.round(cssW / 52));
     const xs = [];
     for (let i = 0; i <= cols; i++) {
-      const jitter = i === 0 || i === cols ? 0 : Math.sin(i * 4.7) * 0.18;
+      const jitter = i === 0 || i === cols ? 0 : M.sin(i * 4.7) * 0.18;
       xs.push(((i + jitter) / cols) * cssW);
     }
     const spectrum = FALLBACK_SPECTRA[accentCode] || FALLBACK_SPECTRA[0];
@@ -563,7 +564,7 @@ void main() {
     const edges = [];
 
     const facetPoly = (pts, idx, lowerHalf) => {
-      const shade = 0.5 + 0.5 * Math.sin(idx * 2.37 + 0.8);
+      const shade = 0.5 + 0.5 * M.sin(idx * 2.37 + 0.8);
       ctx.beginPath();
       ctx.moveTo(pts[0][0], pts[0][1]);
       for (let k = 1; k < pts.length; k++) ctx.lineTo(pts[k][0], pts[k][1]);
@@ -585,7 +586,7 @@ void main() {
         }
         cx /= pts.length;
         cy /= pts.length;
-        const spot = proximityFactor * Math.max(0, 1 - Math.hypot(cx - pointerLocal.x, cy - pointerLocal.y) / 95);
+        const spot = proximityFactor * M.max(0, 1 - M.hypot(cx - pointerLocal.x, cy - pointerLocal.y) / 95);
         if (spot > 0.05) {
           ctx.save();
           ctx.globalAlpha = spot * 0.22;
@@ -600,8 +601,8 @@ void main() {
     for (let i = 0; i < cols; i++) {
       const x0 = xs[i];
       const x1 = xs[i + 1];
-      const midA = cssH * (0.38 + 0.24 * (0.5 + 0.5 * Math.sin(i * 3.1 + 1.2)));
-      const midB = cssH * (0.38 + 0.24 * (0.5 + 0.5 * Math.sin((i + 1) * 3.1 + 1.2)));
+      const midA = cssH * (0.38 + 0.24 * (0.5 + 0.5 * M.sin(i * 3.1 + 1.2)));
+      const midB = cssH * (0.38 + 0.24 * (0.5 + 0.5 * M.sin((i + 1) * 3.1 + 1.2)));
       const slant = cssH * 0.35;
       facetPoly([[x0 + slant, 0], [x1 + slant, 0], [x1, midB], [x0, midA]], fIdx++, false);
       facetPoly([[x0, midA], [x1, midB], [x1 - slant, cssH], [x0 - slant, cssH]], fIdx++, true);
@@ -613,11 +614,11 @@ void main() {
     // 棱线：仅朝向主光的棱亮出 ~0.9px 刀锋，其余为几乎不可见的暗细缝
     for (let e = 0; e < edges.length; e++) {
       const [ax, ay, bx, by] = edges[e];
-      const len = Math.hypot(bx - ax, by - ay) || 1;
+      const len = M.hypot(bx - ax, by - ay) || 1;
       const nx = -(by - ay) / len;
       const ny = (bx - ax) / len;
-      const facingLight = Math.abs(nx * lightDirX + ny * lightDirY);
-      const sel = 0.5 + 0.5 * Math.sin(e * 5.13 + 0.7);
+      const facingLight = M.abs(nx * lightDirX + ny * lightDirY);
+      const sel = 0.5 + 0.5 * M.sin(e * 5.13 + 0.7);
       ctx.beginPath();
       ctx.moveTo(ax, ay);
       ctx.lineTo(bx, by);
@@ -725,7 +726,7 @@ void main() {
 
     // 外缘内缩避开 clip 抗锯齿毛边带
     ctx.beginPath();
-    ctx.roundRect(1.25, 1.25, cssW - 2.5, cssH - 2.5, Math.max(1, r - 1.25));
+    ctx.roundRect(1.25, 1.25, cssW - 2.5, cssH - 2.5, M.max(1, r - 1.25));
     ctx.lineWidth = 0.8;
     ctx.strokeStyle = isDark ? 'rgba(225, 235, 250, 0.20)' : 'rgba(112, 122, 138, 0.65)';
     ctx.stroke();
@@ -782,11 +783,15 @@ void main() {
     // ── 尺寸缓存：ResizeObserver 推送，取消每帧 getBoundingClientRect ──
     let cachedW = 0;
     let cachedH = 0;
+    let cachedL = 0;
+    let cachedT = 0;
+    let hasRect = false;
     let resizeObserver = null;
     const seedSizeFromRect = () => {
       const rect = typeof canvas.getBoundingClientRect === 'function' ? canvas.getBoundingClientRect() : null;
       cachedW = rect ? rect.width : canvas.width || 0;
       cachedH = rect ? rect.height : canvas.height || 0;
+      if (rect && rect.width >= 10) { cachedL = rect.left; cachedT = rect.top; hasRect = true; rectAge = 0; }
       return rect;
     };
     if (typeof ResizeObserver === 'function') {
@@ -796,6 +801,7 @@ void main() {
           cachedW = box.width;
           cachedH = box.height;
         }
+        hasRect = false;
         rectAge = 999; // 布局变化后下一帧校准指针局部坐标
       });
       try {
@@ -892,26 +898,16 @@ void main() {
 
     const readPrismStrength = (st) => clamp(Number(st.prismStrength ?? 1), 0, 1);
 
-    // 指针事件时读取一次 rect，换算为局部坐标并顺带校准尺寸
-    const syncPointerFromRect = () => {
+    // 指针事件时优先复用缓存 rect，避免高频 pointermove 反复触发同步回流
+    const syncPointerFromRect = (force = false) => {
+      if (pointerClientX < -2000 || pointerClientY < -2000) { pointerLocalX = pointerLocalY = -9999; return; }
+      if (!force && hasRect && rectAge < 0.8) { pointerLocalX = pointerClientX - cachedL; pointerLocalY = pointerClientY - cachedT; return; }
       rectAge = 0;
-      if (pointerClientX < -2000 || pointerClientY < -2000) {
-        pointerLocalX = -9999;
-        pointerLocalY = -9999;
-        return;
-      }
       const rect = typeof canvas.getBoundingClientRect === 'function' ? canvas.getBoundingClientRect() : null;
-      if (!rect || rect.width < 10) {
-        pointerLocalX = -9999;
-        pointerLocalY = -9999;
-        return;
-      }
-      if (!resizeObserver) {
-        cachedW = rect.width;
-        cachedH = rect.height;
-      }
-      pointerLocalX = pointerClientX - rect.left;
-      pointerLocalY = pointerClientY - rect.top;
+      if (!rect || rect.width < 10) { hasRect = false; pointerLocalX = pointerLocalY = -9999; return; }
+      if (!resizeObserver) { cachedW = rect.width; cachedH = rect.height; }
+      cachedL = rect.left; cachedT = rect.top; hasRect = true;
+      pointerLocalX = pointerClientX - cachedL; pointerLocalY = pointerClientY - cachedT;
     };
 
     const step = (dtSec = 0.016) => {
@@ -926,10 +922,10 @@ void main() {
         return false;
       }
 
-      // 指针静止但页面滚动 / 重排时，低频（~2Hz）校准局部坐标
+      // 指针静止但页面滚动 / 重排时，低频校准局部坐标
       if (pointerClientX > -2000) {
         rectAge += dt;
-        if (rectAge > 0.5) syncPointerFromRect();
+        if (rectAge > 1.5) syncPointerFromRect(true);
       }
 
       const st = getState() || {};
@@ -939,17 +935,17 @@ void main() {
       const isDark = st.isDark !== false;
       const hideLock = Boolean(st.hideLock);
       const fillRatio = hideLock ? clamp(Number(st.fillRatio ?? 1), 0, 1) : -1;
-      const fillChanged = Math.abs(fillRatio - lastDrawFillRatio) > 0.0008;
+      const fillChanged = M.abs(fillRatio - lastDrawFillRatio) > 0.0008;
       if (fillChanged && hasDrawnFrame) {
         fillSettleSec = 0.24;
       } else if (fillSettleSec > 0) {
-        fillSettleSec = Math.max(0, fillSettleSec - dt);
+        fillSettleSec = M.max(0, fillSettleSec - dt);
       }
       const ambientVal = clamp(Number(st.ambientIntensity ?? 1), 0, 1);
       const prismStrengthVal = clamp(readPrismStrength(st) * ambientVal, 0, 1);
       const accentCode = resolveCrystalAccentCode(st.accentTone ?? st.spectrum ?? 'default');
-      const cssW = Math.round(cachedW * 10) / 10;
-      const cssH = Math.round(cachedH * 10) / 10;
+      const cssW = M.round(cachedW * 10) / 10;
+      const cssH = M.round(cachedH * 10) / 10;
       lastCssW = cssW;
       lastCssH = cssH;
 
@@ -962,15 +958,15 @@ void main() {
         currentProximity = 0;
       } else {
         const tau = targetProximity > currentProximity ? PROXIMITY_ATTACK_SEC : PROXIMITY_RELEASE_SEC;
-        currentProximity += (targetProximity - currentProximity) * (1 - Math.exp(-dt / tau));
-        if (Math.abs(targetProximity - currentProximity) < 0.001) {
+        currentProximity += (targetProximity - currentProximity) * (1 - M.exp(-dt / tau));
+        if (M.abs(targetProximity - currentProximity) < 0.001) {
           currentProximity = targetProximity;
         }
       }
 
-      const dpr = Math.min(2.5, (typeof window !== 'undefined' && window.devicePixelRatio) || 1);
-      const targetW = Math.max(4, Math.round(cssW * dpr));
-      const targetH = Math.max(4, Math.round(cssH * dpr));
+      const dpr = M.min(2.5, (typeof window !== 'undefined' && window.devicePixelRatio) || 1);
+      const targetW = M.max(4, M.round(cssW * dpr));
+      const targetH = M.max(4, M.round(cssH * dpr));
 
       const glintMotionOff = reduceMotion || ambientVal <= 0.001;
       fillGlintIntensities(elapsedTime, glintMotionOff, glintBuf);
@@ -993,22 +989,22 @@ void main() {
           if (p >= 1) {
             wakeT = -1;
           } else {
-            const eased = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+            const eased = p < 0.5 ? 2 * p * p : 1 - M.pow(-2 * p + 2, 2) / 2;
             wakeU = -0.1 + 1.2 * eased;
-            wakeAmp = Math.pow(Math.sin(Math.PI * p), 0.6) * ambientVal;
+            wakeAmp = M.pow(M.sin(M.PI * p), 0.6) * ambientVal;
             for (let i = 0; i < 4; i++) {
               const d = wakeU - GLINT_ANCHORS[i].u;
-              const boost = Math.exp(-(d * d) / 0.006) * 0.95;
+              const boost = M.exp(-(d * d) / 0.006) * 0.95;
               if (boost > glintBuf[i]) glintBuf[i] = boost;
             }
           }
         }
       }
 
-      const maxGlint = Math.max(glintBuf[0], glintBuf[1], glintBuf[2], glintBuf[3]);
+      const maxGlint = M.max(glintBuf[0], glintBuf[1], glintBuf[2], glintBuf[3]);
       let maxGlintDelta = 0;
       for (let i = 0; i < 4; i++) {
-        const gd = Math.abs(glintBuf[i] - lastDrawnGlint[i]);
+        const gd = M.abs(glintBuf[i] - lastDrawnGlint[i]);
         if (gd > maxGlintDelta) maxGlintDelta = gd;
       }
       glintAccumSec += dt;
@@ -1033,8 +1029,8 @@ void main() {
         reduceMotion !== lastDrawReduce ||
         hideLock !== lastDrawHideLock ||
         fillChanged ||
-        Math.abs(ambientVal - lastDrawAmbient) > 0.002 ||
-        Math.abs(prismStrengthVal - lastDrawStrength) > 0.002;
+        M.abs(ambientVal - lastDrawAmbient) > 0.002 ||
+        M.abs(prismStrengthVal - lastDrawStrength) > 0.002;
 
       const needsRender =
         paramsChanged ||
@@ -1117,7 +1113,7 @@ void main() {
       if (reduceMotion || lastDrawAmbient === 0) return true;
       if (wasLiquidFlow) return false;
       fillGlintIntensities(elapsedTime, false, glintBuf);
-      return Math.max(glintBuf[0], glintBuf[1], glintBuf[2], glintBuf[3]) <= 0.015;
+      return M.max(glintBuf[0], glintBuf[1], glintBuf[2], glintBuf[3]) <= 0.015;
     };
 
     return {
@@ -1158,7 +1154,7 @@ void main() {
           zeroCopy: rendererMode === 'webgl2',
           width: lastCssW,
           height: lastCssH,
-          proximityFactor: Math.round(currentProximity * 1000) / 1000,
+          proximityFactor: M.round(currentProximity * 1000) / 1000,
           dispersionActive: currentProximity > 0.05 && lastDrawAccent !== 5,
           accentCode: lastDrawAccent >= 0 ? lastDrawAccent : 0,
           ambientIntensity: lastDrawAmbient >= 0 ? lastDrawAmbient : 1,
